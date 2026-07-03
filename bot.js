@@ -909,7 +909,7 @@ function buildFixedLimitStakeTx(hotkey, netuid, amountBigInt, maxPriceLimit) {
 const doubleStakingRegistered = new Set(); // 严格控制每个 netuid 仅注册一个二次定时器
 
 // Core extrinsic execution triggers
-async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockNum = null) {
+async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockNum = null, triggerExtras = null) {
   const { callName, args, txHash, signer, nonce } = parsed;
   const settings = database.getSettings();
   const now = Date.now();
@@ -995,6 +995,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
             : `<i>🔥 策略 1 开启，立即启动极速打新！</i>`;
 
           const hasPublic = privateWallet.hasPublic(wallets);
+          let primaryAfterBroadcast = null;
           if (settings.dashingEnabled) {
             if (hasPublic) {
               const tgMsg = `${title}\n` +
@@ -1005,8 +1006,9 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                             `• <b>触发来源</b>: <code>${triggerSrc}</code>\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `${footer}`;
-              const trace = createTrace();
-              const afterBroadcast = [];
+              const trace = triggerExtras?.trace || createTrace();
+              const afterBroadcast = triggerExtras?.afterBroadcast || [];
+              primaryAfterBroadcast = afterBroadcast;
               traceLog(trace, 'INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
               afterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
               executeStakingSniping(netuid, targetHotkey, triggerSrc, now, { trace, afterBroadcast }).catch(e => {
@@ -1036,7 +1038,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
           }
 
           // 执行二次延迟交易逻辑 - 倒计时起点为检测到 startCall 的这一瞬间
-          handleDoubleStaking(netuid, targetHotkey, fallbackSource, now);
+          handleDoubleStaking(netuid, targetHotkey, fallbackSource, now, primaryAfterBroadcast);
         } else {
           log('WARN', `[新子网打新] 扫到 startCall 激活交易，但全局默认 Hotkey 未配置，取消抢跑。`);
         }
@@ -1127,8 +1129,8 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                             `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `${footer}`;
-              triggerTrace = createTrace();
-              triggerAfterBroadcast = [];
+              triggerTrace = triggerExtras?.trace || createTrace();
+              triggerAfterBroadcast = triggerExtras?.afterBroadcast || [];
               traceLog(triggerTrace, 'INFO', `[改名抢跑] [${fallbackSource}] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}" (Hash: ${txHash})`);
               triggerAfterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
             }
@@ -1219,8 +1221,8 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                                 `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
                                 `━━━━━━━━━━━━━━━━━━\n` +
                                 `${footer}`;
-                  triggerTrace = createTrace();
-                  triggerAfterBroadcast = [];
+                  triggerTrace = triggerExtras?.trace || createTrace();
+                  triggerAfterBroadcast = triggerExtras?.afterBroadcast || [];
                   traceLog(triggerTrace, 'INFO', `[冷键交换抢跑] 扫到交换冷键声明 -> ${callName} (Old Coldkey: ${oldColdkey}) | 交易池排队 Nonce: ${nonce}`);
                   traceLog(triggerTrace, 'INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，策略 3 开启，立即执行抢跑！`);
                   triggerAfterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
@@ -1290,6 +1292,15 @@ async function detectEventsInBlock(blockHash, blockNumber) {
   }
 
   const now = Date.now();
+  const afterBlockFallback = [];
+  const flushAfterBlockFallback = () => {
+    for (const fn of afterBlockFallback) {
+      const timer = setTimeout(fn, 1000);
+      if (typeof timer.unref === 'function') {
+        timer.unref();
+      }
+    }
+  };
 
   // 获取区块的所有事件并解析输出日志
   let allRecords = [];
@@ -1311,32 +1322,36 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       if (section === 'subtensorModule' && method === 'NetworkAdded') {
         const netuid = data[0];
         const logMsg = `[新子网打新] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式注册成功！`;
-        log('SUCCESS', logMsg);
-        sendTelegramAlert(
-          `🎉 <b>[新子网打新 链上注册成功]</b>\n` +
-          `━━━━━━━━━━━━━━━━━━\n` +
-          `• <b>注册子网</b>: <code>SN#${netuid}</code>\n` +
-          `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-          `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-          `━━━━━━━━━━━━━━━━━━\n` +
-          `<i>🎉 子网已被链正式确认添加！</i>`
-        ).catch(() => {});
+        afterBlockFallback.push(() => {
+          log('SUCCESS', logMsg);
+          sendTelegramAlert(
+            `🎉 <b>[新子网打新 链上注册成功]</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `• <b>注册子网</b>: <code>SN#${netuid}</code>\n` +
+            `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>🎉 子网已被链正式确认添加！</i>`
+          ).catch(() => {});
+        });
       }
 
       // 2. SubnetIdentitySet (子网改名成功)
       if (section === 'subtensorModule' && method === 'SubnetIdentitySet') {
         const netuid = data[0];
         const logMsg = `[改名抢跑] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式改名成功！`;
-        log('SUCCESS', logMsg);
-        sendTelegramAlert(
-          `🎉 <b>[改名抢跑 链上改名成功]</b>\n` +
-          `━━━━━━━━━━━━━━━━━━\n` +
-          `• <b>改名子网</b>: <code>SN#${netuid}</code>\n` +
-          `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-          `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-          `━━━━━━━━━━━━━━━━━━\n` +
-          `<i>🎉 目标子网改名已由链正式确认！</i>`
-        ).catch(() => {});
+        afterBlockFallback.push(() => {
+          log('SUCCESS', logMsg);
+          sendTelegramAlert(
+            `🎉 <b>[改名抢跑 链上改名成功]</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `• <b>改名子网</b>: <code>SN#${netuid}</code>\n` +
+            `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>🎉 目标子网改名已由链正式确认！</i>`
+          ).catch(() => {});
+        });
       }
 
       // 3. ColdkeySwapAnnounced (冷键交换声明成功)
@@ -1405,7 +1420,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
         if (w) {
           if (!privateWallet.isPrivate(w)) {
             const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
-            log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
+            const logMsg = `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`;
 
             let strategyLabel = '新子网打新';
             const nowTime = Date.now();
@@ -1421,18 +1436,21 @@ async function detectEventsInBlock(blockHash, blockNumber) {
               }
             }
 
-            sendTelegramAlert(
-              `🔔 <b>[${strategyLabel} 链上最终确认]</b>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `• <b>我方钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
-              `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-              `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-              `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
-              `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-              `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `<i>🎉 资金已最终确认上链！</i>`
-            ).catch(() => {});
+            afterBlockFallback.push(() => {
+              log('SUCCESS', logMsg);
+              sendTelegramAlert(
+                `🔔 <b>[${strategyLabel} 链上最终确认]</b>\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                `• <b>我方钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
+                `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+                `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+                `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
+                `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
+                `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                `<i>🎉 资金已最终确认上链！</i>`
+              ).catch(() => {});
+            });
           }
         }
       }
@@ -1441,7 +1459,10 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
   const block = await api.rpc.chain.getBlock(blockHash);
   const extrinsics = block?.block?.extrinsics;
-  if (!extrinsics || extrinsics.length === 0) return;
+  if (!extrinsics || extrinsics.length === 0) {
+    flushAfterBlockFallback();
+    return;
+  }
 
   for (let extIndex = 0; extIndex < extrinsics.length; extIndex++) {
     const ext = extrinsics[extIndex];
@@ -1470,8 +1491,13 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       if (entry && entry.handled) continue;
 
       if (isRename) {
-        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber);
+        const triggerTrace = createTrace();
+        const triggerAfterBroadcast = [];
+        traceLog(triggerTrace, 'INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
+        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
+          trace: triggerTrace,
+          afterBroadcast: triggerAfterBroadcast
+        });
         seenHashes.set(parsed.txHash, {
           timestamp: now,
           netuid: null,
@@ -1481,25 +1507,30 @@ async function detectEventsInBlock(blockHash, blockNumber) {
         });
       } else if (isStartCall) {
         const netuid = Number(parsed.args.netuid?.toString() || parsed.args[0]?.toString());
+        const triggerTrace = createTrace();
+        const triggerAfterBroadcast = [];
         if (Number.isFinite(netuid) && netuid > 0) {
           const actionKey = `startCallConfirmed:${blockNumber}:${netuid}`;
           if (!seenActions.has(actionKey)) {
             seenActions.set(actionKey, now);
             const logMsg = `[新子网打新] 目标子网 #${netuid} 的 startCall 激活交易已于区块 #${blockNumber} 第 ${extIndex} 笔交易正式确认成功！`;
-            log('SUCCESS', logMsg);
-            sendTelegramAlert(
+            const startCallConfirmedMsg =
               `🎉 <b>[新子网打新 链上激活成功]</b>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
               `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
               `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
               `• <b>排队位置</b>: <code>第 ${extIndex} 笔交易</code>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
-              `<i>🎉 子网已被所有者正式激活！</i>`
-            ).catch(() => {});
+              `<i>🎉 子网已被所有者正式激活！</i>`;
+            traceLog(triggerTrace, 'SUCCESS', logMsg);
+            triggerAfterBroadcast.push(() => sendTelegramAlert(startCallConfirmedMsg).catch(() => {}));
           }
         }
-        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的 startCall 激活交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber);
+        traceLog(triggerTrace, 'INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的 startCall 激活交易 (Hash: ${parsed.txHash})`);
+        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
+          trace: triggerTrace,
+          afterBroadcast: triggerAfterBroadcast
+        });
         seenHashes.set(parsed.txHash, {
           timestamp: now,
           netuid: null,
@@ -1512,6 +1543,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       // 单个 extrinsic 的执行/解析异常，不影响其他 extrinsic 运行
     }
   }
+  flushAfterBlockFallback();
 }
 
 // Resolve a valid hotkey for a given subnet using multi-tiered fallback
@@ -2135,7 +2167,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown', 
 }
 
 // 二次延时交易执行逻辑 - 传入 source 表明是由交易池还是区块兜底触发的倒计时
-function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
+function handleDoubleStaking(netuid, hotkey, source, detectedAt = null, afterPrimaryBroadcast = null) {
   const settings = database.getSettings();
   const delaySec = Number(settings.dashingDoubleStakingDelay || 0);
   if (delaySec > 0) {
@@ -2163,7 +2195,12 @@ function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
     }
     doubleStakingRegistered.add(netuid);
     if (hasPublic) {
-      log('INFO', `[新子网打新] 已登记二次延时买入任务：将在 ${source}-startCall 触发 ${delaySec} 秒后再次执行买入。`);
+      const msg = `[新子网打新] 已登记二次延时买入任务：将在 ${source}-startCall 触发 ${delaySec} 秒后再次执行买入。`;
+      if (afterPrimaryBroadcast) {
+        afterPrimaryBroadcast.push(() => log('INFO', msg));
+      } else {
+        log('INFO', msg);
+      }
     }
     setTimeout(() => {
       doubleStakingRegistered.delete(netuid); // 定时器触发后从内存中移除，允许后续轮次（如果有）重新注册
@@ -2173,10 +2210,17 @@ function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
         }
         return;
       }
+      let triggerTrace = null;
+      let triggerAfterBroadcast = null;
       if (hasPublic) {
-        log('INFO', `[新子网打新] [二次延迟买入] 延时 ${delaySec} 秒已到，开始发起二次打新交易！`);
+        triggerTrace = createTrace();
+        triggerAfterBroadcast = [];
+        traceLog(triggerTrace, 'INFO', `[新子网打新] [二次延迟买入] 延时 ${delaySec} 秒已到，开始发起二次打新交易！`);
       }
-      executeStakingSniping(netuid, hotkey, `DoubleStaking-${source}-Delay${delaySec}s`, detectedAt || Date.now()).catch(e => {
+      executeStakingSniping(netuid, hotkey, `DoubleStaking-${source}-Delay${delaySec}s`, detectedAt || Date.now(), {
+        trace: triggerTrace,
+        afterBroadcast: triggerAfterBroadcast
+      }).catch(e => {
         if (hasPublic) {
           log('ERROR', `[新子网打新] [二次延迟买入] 执行二次抢购失败: ${e.message}`);
         }
