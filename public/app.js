@@ -311,7 +311,6 @@ async function loadConfig() {
     document.getElementById('strat-dashing-timeout').value = cfg.dashingTimeoutMs;
     document.getElementById('strat-dashing-timeout-retries').value = cfg.dashingTimeoutRetries !== undefined ? cfg.dashingTimeoutRetries : 0;
     document.getElementById('strat-dashing-double-delay').value = cfg.dashingDoubleStakingDelay !== undefined ? cfg.dashingDoubleStakingDelay : '';
-    document.getElementById('strat-dashing-double-slippage').value = cfg.dashingDoubleSlippageLimit !== undefined ? cfg.dashingDoubleSlippageLimit : '';
     document.getElementById('strat-dashing-max-price').value = cfg.dashingMaxPrice !== undefined ? cfg.dashingMaxPrice : '';
     document.getElementById('strat-dashing-double-max-price').value = cfg.dashingDoubleMaxPrice !== undefined ? cfg.dashingDoubleMaxPrice : '';
     
@@ -335,7 +334,6 @@ async function loadConfig() {
     document.getElementById('cfg-default-hotkey').value = cfg.defaultHotkey || '';
     
     // Slippage Limits
-    document.getElementById('strat-dashing-slippage').value = cfg.dashingSlippageLimit !== undefined ? cfg.dashingSlippageLimit : '';
     document.getElementById('strat-rename-slippage').value = cfg.renameSlippageLimit !== undefined ? cfg.renameSlippageLimit : '';
     document.getElementById('strat-swap-slippage').value = cfg.swapSlippageLimit !== undefined ? cfg.swapSlippageLimit : '';
     
@@ -355,25 +353,24 @@ async function loadConfig() {
 
 // Save all strategy settings
 async function saveStrategies() {
-  const dashingSlippage = document.getElementById('strat-dashing-slippage').value !== '' ? Number(document.getElementById('strat-dashing-slippage').value) : 0;
   const dashingMaxPrice = document.getElementById('strat-dashing-max-price').value !== '' ? Number(document.getElementById('strat-dashing-max-price').value) : 0;
+  const dashingEnabled = document.getElementById('strat-dashing-enabled').checked;
   
-  if (dashingSlippage <= 0 && dashingMaxPrice <= 0) {
-    alert('【主线打新校验失败】：滑点限制与最高价格限制不能同时为空或为 0！必须至少填写一个以防被夹（Sandwich Attack）。');
+  if (dashingEnabled && dashingMaxPrice <= 0) {
+    alert('【主线打新校验失败】：策略 1 已改为固定最高限价模式，主线最高限价必须大于 0。');
     return;
   }
   
   const doubleDelay = Number(document.getElementById('strat-dashing-double-delay').value || 0);
-  const dashingDoubleSlippage = document.getElementById('strat-dashing-double-slippage').value !== '' ? Number(document.getElementById('strat-dashing-double-slippage').value) : 0;
   const dashingDoubleMaxPrice = document.getElementById('strat-dashing-double-max-price').value !== '' ? Number(document.getElementById('strat-dashing-double-max-price').value) : 0;
   
-  if (doubleDelay > 0 && dashingDoubleSlippage <= 0 && dashingDoubleMaxPrice <= 0) {
-    alert('【二次延迟校验失败】：已配置延迟时间，但二次延迟的滑点限制与最高价格限制不能同时为空或为 0！必须至少填写一个以防被夹（Sandwich Attack）。');
+  if (doubleDelay > 0 && dashingDoubleMaxPrice <= 0) {
+    alert('【二次延迟校验失败】：已配置延迟时间，二次延迟最高限价必须大于 0。');
     return;
   }
 
   const payload = {
-    dashingEnabled: document.getElementById('strat-dashing-enabled').checked,
+    dashingEnabled: dashingEnabled,
     dashingAmount: Number(document.getElementById('strat-dashing-amount').value),
     dashingBurstCount: Number(document.getElementById('strat-dashing-burst').value || 1),
     dashingRetries: Number(document.getElementById('strat-dashing-retries').value),
@@ -381,7 +378,6 @@ async function saveStrategies() {
     dashingTimeoutMs: Number(document.getElementById('strat-dashing-timeout').value),
     dashingTimeoutRetries: Number(document.getElementById('strat-dashing-timeout-retries').value || 0),
     dashingDoubleStakingDelay: doubleDelay,
-    dashingDoubleSlippageLimit: dashingDoubleSlippage,
     dashingDoubleMaxPrice: dashingDoubleMaxPrice,
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
@@ -401,7 +397,6 @@ async function saveStrategies() {
     swapTimeoutRetries: Number(document.getElementById('strat-swap-timeout-retries').value || 0),
     
     // Slippage Limits
-    dashingSlippageLimit: dashingSlippage,
     dashingMaxPrice: dashingMaxPrice,
     renameSlippageLimit: document.getElementById('strat-rename-slippage').value !== '' ? Number(document.getElementById('strat-rename-slippage').value) : 0.05,
     swapSlippageLimit: document.getElementById('strat-swap-slippage').value !== '' ? Number(document.getElementById('strat-swap-slippage').value) : 0.05,

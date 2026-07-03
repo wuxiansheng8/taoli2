@@ -67,13 +67,11 @@ const DEFAULT_SETTINGS = {
   dashingRetries: 10,
   dashingIntervalMs: 1000,
   dashingTimeoutMs: 30000,
-  dashingSlippageLimit: 0, // 留空为不限制相对滑点，直接为 0 (禁用)
   dashingBurstCount: 1, // number of concurrent staking transactions per wallet
   dashingDoubleStakingDelay: 0, // delay in seconds for second buy-in
-  dashingDoubleSlippageLimit: 0, // 留空为不限制相对滑点，直接为 0 (禁用)
   dashingTimeoutRetries: 0,
-  dashingMaxPrice: 0, // 主线最大价格限制 (TAO/Alpha, 0为无限制)
-  dashingDoubleMaxPrice: 0, // 二次延迟最大价格限制 (TAO/Alpha, 0为无限制)
+  dashingMaxPrice: 0, // 主线固定最高限价 (TAO/Alpha, 策略 1 开启时必须 > 0)
+  dashingDoubleMaxPrice: 0, // 二次延迟固定最高限价 (TAO/Alpha, 二次延迟开启时必须 > 0)
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
@@ -128,43 +126,88 @@ function decrypt(text) {
   }
 }
 
-// Settings management
-function getSettings() {
-  if (!fs.existsSync(SETTINGS_FILE)) {
-    saveSettings(DEFAULT_SETTINGS);
-    return DEFAULT_SETTINGS;
-  }
+let settingsCache = null;
+let cooldownsCache = null;
+let cooldownsFlushTimer = null;
+
+function cleanSettings(settings) {
+  const next = { ...settings };
+  // 主动剔除历史配置文件里的旧 MEV 属性，让其自动退场
+  delete next.dashingMevShieldEnabled;
+  delete next.renameMevShieldEnabled;
+  delete next.swapMevShieldEnabled;
+  delete next.sandwichEnabled;
+  delete next.sandwichAmount;
+  delete next.sandwichThreshold;
+  delete next.sandwichTip;
+  delete next.sandwichAutoSell;
+  delete next.sandwichSellTip;
+  delete next.sandwichSlippageLimit;
+  delete next.sandwichTimeoutMs;
+  delete next.dynamicSlippageEnabled;
+  delete next.dynamicSlippageSafetyFactor;
+  delete next.dashingTip;
+  delete next.renameTip;
+  delete next.swapTip;
+  delete next.rateLimitPerSec;
+  // 策略 1 已改为固定最高限价，清理旧滑点配置。
+  delete next.dashingSlippageLimit;
+  delete next.dashingDoubleSlippageLimit;
+  return next;
+}
+
+function initCache() {
   try {
-    const rawData = fs.readFileSync(SETTINGS_FILE, 'utf8');
-    const settings = JSON.parse(rawData);
-    // 主动剔除历史配置文件里的旧 MEV 属性，让其自动退场
-    delete settings.dashingMevShieldEnabled;
-    delete settings.renameMevShieldEnabled;
-    delete settings.swapMevShieldEnabled;
-    delete settings.sandwichEnabled;
-    delete settings.sandwichAmount;
-    delete settings.sandwichThreshold;
-    delete settings.sandwichTip;
-    delete settings.sandwichAutoSell;
-    delete settings.sandwichSellTip;
-    delete settings.sandwichSlippageLimit;
-    delete settings.sandwichTimeoutMs;
-    delete settings.dynamicSlippageEnabled;
-    delete settings.dynamicSlippageSafetyFactor;
-    delete settings.dashingTip;
-    delete settings.renameTip;
-    delete settings.swapTip;
-    delete settings.rateLimitPerSec;
-    return { ...DEFAULT_SETTINGS, ...settings };
+    if (!fs.existsSync(SETTINGS_FILE)) {
+      settingsCache = { ...DEFAULT_SETTINGS };
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settingsCache, null, 2), 'utf8');
+    } else {
+      const rawData = fs.readFileSync(SETTINGS_FILE, 'utf8');
+      settingsCache = { ...DEFAULT_SETTINGS, ...cleanSettings(JSON.parse(rawData)) };
+    }
   } catch (e) {
     console.error('Error reading settings file, using defaults:', e);
-    return DEFAULT_SETTINGS;
+    settingsCache = { ...DEFAULT_SETTINGS };
   }
+
+  try {
+    if (fs.existsSync(COOLDOWNS_FILE)) {
+      cooldownsCache = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    } else {
+      cooldownsCache = {};
+    }
+  } catch (e) {
+    console.error('Error reading cooldowns:', e);
+    cooldownsCache = {};
+  }
+}
+
+function flushCooldownsSoon() {
+  if (cooldownsFlushTimer) return;
+  cooldownsFlushTimer = setTimeout(() => {
+    cooldownsFlushTimer = null;
+    const snapshot = cooldownsCache || {};
+    fs.promises.writeFile(COOLDOWNS_FILE, JSON.stringify(snapshot, null, 2), 'utf8')
+      .catch(e => console.error('Error async writing cooldowns:', e));
+  }, 1000);
+  if (typeof cooldownsFlushTimer.unref === 'function') {
+    cooldownsFlushTimer.unref();
+  }
+}
+
+initCache();
+
+// Settings management
+function getSettings() {
+  if (!settingsCache) initCache();
+  return { ...settingsCache };
 }
 
 function saveSettings(settings) {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+    settingsCache = { ...DEFAULT_SETTINGS, ...cleanSettings(settings) };
+    fs.promises.writeFile(SETTINGS_FILE, JSON.stringify(settingsCache, null, 2), 'utf8')
+      .catch(e => console.error('Error async writing settings:', e));
     return true;
   } catch (e) {
     console.error('Error writing settings file:', e);
@@ -260,23 +303,14 @@ function deleteWallet(name) {
 }
 
 function getCooldown(key) {
-  try {
-    if (!fs.existsSync(COOLDOWNS_FILE)) return null;
-    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
-    return cooldowns[key] || null;
-  } catch (e) {
-    console.error('Error reading cooldowns:', e);
-    return null;
-  }
+  if (!cooldownsCache) initCache();
+  return cooldownsCache[key] || null;
 }
 
 function setCooldown(key, data) {
   try {
-    let cooldowns = {};
-    if (fs.existsSync(COOLDOWNS_FILE)) {
-      cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
-    }
-    cooldowns[key] = {
+    if (!cooldownsCache) initCache();
+    cooldownsCache[key] = {
       ...data,
       firstTriggeredAt: Date.now()
     };
@@ -284,13 +318,13 @@ function setCooldown(key, data) {
     // Clean up expired cooldowns (older than 24 hours)
     const now = Date.now();
     const expiry = 24 * 60 * 60 * 1000;
-    for (const k in cooldowns) {
-      if (!cooldowns[k] || !cooldowns[k].firstTriggeredAt || now - cooldowns[k].firstTriggeredAt > expiry) {
-        delete cooldowns[k];
+    for (const k in cooldownsCache) {
+      if (!cooldownsCache[k] || !cooldownsCache[k].firstTriggeredAt || now - cooldownsCache[k].firstTriggeredAt > expiry) {
+        delete cooldownsCache[k];
       }
     }
-    
-    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+
+    flushCooldownsSoon();
     return true;
   } catch (e) {
     console.error('Error writing cooldowns:', e);
@@ -300,22 +334,21 @@ function setCooldown(key, data) {
 
 function clearCooldownsByStrategy(strategyPrefix) {
   try {
-    if (!fs.existsSync(COOLDOWNS_FILE)) return 0;
-    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    if (!cooldownsCache) initCache();
     let clearedCount = 0;
     
-    for (const key in cooldowns) {
+    for (const key in cooldownsCache) {
       if (
         (strategyPrefix === 'new-subnet' && (key.startsWith('new-subnet:') || key.startsWith('new-subnet-double:'))) ||
         (strategyPrefix === 'rename' && key.startsWith('rename:')) ||
         (strategyPrefix === 'coldkey-swap' && key.startsWith('coldkey-swap:'))
       ) {
-        delete cooldowns[key];
+        delete cooldownsCache[key];
         clearedCount++;
       }
     }
-    
-    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+
+    flushCooldownsSoon();
     return clearedCount;
   } catch (e) {
     console.error('Error clearing cooldowns:', e);

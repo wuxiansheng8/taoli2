@@ -15,6 +15,9 @@
   "dashingRetries": 10,
   "dashingIntervalMs": 1000,
   "dashingTimeoutMs": 30000,
+  "dashingMaxPrice": 0,
+  "dashingDoubleStakingDelay": 0,
+  "dashingDoubleMaxPrice": 0,
   "renameEnabled": true,
   "swapEnabled": true,
   "nonceSyncIntervalSeconds": 60

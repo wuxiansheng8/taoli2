@@ -9,6 +9,8 @@ const nonceSync = require('./nonceSync');
 const fs = require('fs');
 const path = require('path');
 const privateWallet = require('./privateWallet');
+const { createTrace, flushTrace, formatBeijingTime, traceLog } = require('./traceLogger');
+const { buildFixedLimitStakeTx: makeFixedLimitStakeTx } = require('./stakeLimitTx');
 
 
 // Logs buffer and state
@@ -266,16 +268,11 @@ function isSubnetOwnerAddress(address) {
 }
 
 // Helper to log with Beijing Time (UTC+8)
-function log(level, message) {
+function log(level, message, timestamp = Date.now()) {
   if (privateWallet.shouldSuppress(message)) {
     return;
   }
-  const tzOffset = 8 * 60; // Beijing is UTC+8
-  const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  const beijingTime = new Date(utc + (3600000 * 8));
-
-  const timeStr = beijingTime.toISOString().replace('T', ' ').replace('Z', '');
+  const timeStr = formatBeijingTime(timestamp);
   const formattedLog = {
     time: timeStr,
     level: level.toUpperCase(), // 'INFO', 'WARN', 'ERROR', 'SUCCESS'
@@ -584,15 +581,12 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
       await tx.signAsync(pair, options);
       const signDuration = Date.now() - signStartTime;
       const signedTxHex = tx.toHex();
-      const buildDuration = Date.now() - startTime;
+      const signedAt = Date.now();
+      const buildDuration = signedAt - startTime;
 
       const callDetails = `${tx.method.section}.${tx.method.method}`;
-      const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${Date.now() - meta.detectedAt}ms` : '';
-      if (!meta || !meta.isPrivate) {
-        log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 签名耗时: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
-      }
-
       broadcastSignedTx(signedTxHex);
+      const broadcastAt = Date.now();
 
       tx.send(({ status, events, dispatchError }) => {
         if (status.isInBlock || status.isFinalized) {
@@ -641,6 +635,20 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
         refreshNonceForwardOnly(address);
         finish({ success: false, error: error.message });
       });
+
+      if (meta && meta.trace) {
+        flushTrace(meta.trace, log);
+      }
+      if (meta && meta.afterBroadcast && !meta.afterBroadcast.flushed) {
+        meta.afterBroadcast.flushed = true;
+        for (const fn of meta.afterBroadcast) {
+          setImmediate(fn);
+        }
+      }
+      const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${broadcastAt - meta.detectedAt}ms` : '';
+      if (!meta || !meta.isPrivate) {
+        log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并广播 ${callDetails} | Nonce: ${reservedNonce} | 签名耗时: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms | 广播前准备: ${broadcastAt - signedAt}ms${latencyStr}`, broadcastAt);
+      }
     } catch (err) {
       refreshNonceForwardOnly(address);
       finish({ success: false, error: `Signing failed: ${err.message}` });
@@ -891,6 +899,12 @@ async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPric
   return api.tx.subtensorModule.addStake(hotkey, netuid, amountBigInt);
 }
 
+function buildFixedLimitStakeTx(hotkey, netuid, amountBigInt, maxPriceLimit) {
+  const settings = database.getSettings();
+  const allowPartial = settings.allowPartialStaking !== false;
+  return makeFixedLimitStakeTx(api, hotkey, netuid, amountBigInt, maxPriceLimit, allowPartial);
+}
+
 // Strategy triggers and pending states
 const doubleStakingRegistered = new Set(); // 严格控制每个 netuid 仅注册一个二次定时器
 
@@ -983,8 +997,6 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
           const hasPublic = privateWallet.hasPublic(wallets);
           if (settings.dashingEnabled) {
             if (hasPublic) {
-              log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
-
               const tgMsg = `${title}\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
@@ -993,14 +1005,16 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                             `• <b>触发来源</b>: <code>${triggerSrc}</code>\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `${footer}`;
-              sendTelegramAlert(tgMsg).catch(() => {});
-            }
-
-            executeStakingSniping(netuid, targetHotkey, triggerSrc, now).catch(e => {
-              if (hasPublic) {
+              const trace = createTrace();
+              const afterBroadcast = [];
+              traceLog(trace, 'INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
+              afterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
+              executeStakingSniping(netuid, targetHotkey, triggerSrc, now, { trace, afterBroadcast }).catch(e => {
                 log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
-              }
-            });
+              });
+            } else {
+              executeStakingSniping(netuid, targetHotkey, triggerSrc, now).catch(() => {});
+            }
           } else {
             if (hasPublic) {
               log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})。策略 1 主开关已关闭，跳过主线买入。`);
@@ -1101,21 +1115,29 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
 
           const hasPublic = privateWallet.hasPublic(wallets);
           if (settings.renameEnabled) {
+            let triggerTrace = null;
+            let triggerAfterBroadcast = null;
             if (hasPublic) {
-              log('INFO', `[改名抢跑] [${fallbackSource}] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}" (Hash: ${txHash})`);
-              sendTelegramAlert(
-                `${title}\n` +
-                `━━━━━━━━━━━━━━━━━━\n` +
-                `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-                `• <b>拟改名称</b>: <code>${escapeHtml(cleanName)}</code>\n` +
-                `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
-                triggerBlockStr +
-                `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
-                `━━━━━━━━━━━━━━━━━━\n` +
-                `${footer}`
-              );
+              const tgMsg = `${title}\n` +
+                            `━━━━━━━━━━━━━━━━━━\n` +
+                            `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
+                            `• <b>拟改名称</b>: <code>${escapeHtml(cleanName)}</code>\n` +
+                            `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
+                            triggerBlockStr +
+                            `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
+                            `━━━━━━━━━━━━━━━━━━\n` +
+                            `${footer}`;
+              triggerTrace = createTrace();
+              triggerAfterBroadcast = [];
+              traceLog(triggerTrace, 'INFO', `[改名抢跑] [${fallbackSource}] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}" (Hash: ${txHash})`);
+              triggerAfterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
             }
-            executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, '改名抢跑', settings.renameSlippageLimit, { cleanName, detectedAt: now });
+            executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, '改名抢跑', settings.renameSlippageLimit, {
+              cleanName,
+              detectedAt: now,
+              trace: triggerTrace,
+              afterBroadcast: triggerAfterBroadcast
+            });
           } else {
             if (hasPublic) {
               log('INFO', `[改名抢跑] [${fallbackSource}] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}"。但策略 2 开关关闭，跳过买入。`);
@@ -1162,7 +1184,6 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
         const actionKey = `swap:mempool:${oldColdkey}`;
         if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
-        log('INFO', `[冷键交换抢跑] 扫到交换冷键声明 -> ${callName} (Old Coldkey: ${oldColdkey}) | 交易池排队 Nonce: ${nonce}`);
 
         let matched = false;
         let anyHotkeyResolveFailed = false;
@@ -1186,21 +1207,30 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
 
               const hasPublic = privateWallet.hasPublic(wallets);
               if (settings.swapEnabled) {
+                let triggerTrace = null;
+                let triggerAfterBroadcast = null;
                 if (hasPublic) {
-                  log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，策略 3 开启，立即执行抢跑！`);
-                  sendTelegramAlert(
-                    `${title}\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
-                    `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
-                    `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
-                    triggerBlockStr +
-                    `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `${footer}`
-                  );
+                  const tgMsg = `${title}\n` +
+                                `━━━━━━━━━━━━━━━━━━\n` +
+                                `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
+                                `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
+                                `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
+                                triggerBlockStr +
+                                `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
+                                `━━━━━━━━━━━━━━━━━━\n` +
+                                `${footer}`;
+                  triggerTrace = createTrace();
+                  triggerAfterBroadcast = [];
+                  traceLog(triggerTrace, 'INFO', `[冷键交换抢跑] 扫到交换冷键声明 -> ${callName} (Old Coldkey: ${oldColdkey}) | 交易池排队 Nonce: ${nonce}`);
+                  traceLog(triggerTrace, 'INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，策略 3 开启，立即执行抢跑！`);
+                  triggerAfterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
                 }
-                executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, '冷键交换抢跑', settings.swapSlippageLimit, { oldColdkey, detectedAt: now });
+                executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, '冷键交换抢跑', settings.swapSlippageLimit, {
+                  oldColdkey,
+                  detectedAt: now,
+                  trace: triggerTrace,
+                  afterBroadcast: triggerAfterBroadcast
+                });
               } else {
                 if (hasPublic) {
                   log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，但策略 3 开关关闭，跳过买入。`);
@@ -1316,20 +1346,15 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
         if (settings.swapEnabled && isSubnetOwnerAddress(coldkey)) {
           const logMsg = `[冷键交换声明成功] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkeyHash}！`;
-          log('SUCCESS', logMsg);
-
           const hasPublic = privateWallet.hasPublic(wallets);
-          if (hasPublic) {
-            sendTelegramAlert(
-              `🎉 <b>[冷键交换 链上发起成功]</b>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `• <b>声明钱包</b>: <code>${coldkey}</code>\n` +
-              `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-              `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `<i>🎉 冷键交换声明已由链正式确认！</i>`
-            ).catch(() => {});
-          }
+          const coldkeyAnnouncedMsg =
+            `🎉 <b>[冷键交换 链上发起成功]</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `• <b>声明钱包</b>: <code>${coldkey}</code>\n` +
+            `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>🎉 冷键交换声明已由链正式确认！</i>`;
 
           const ownedNetuids = subnetOwnerNetuidsMap.get(coldkey) || [];
           for (const netuid of ownedNetuids) {
@@ -1340,13 +1365,26 @@ async function detectEventsInBlock(blockHash, blockNumber) {
             try {
               const targetHotkey = await resolveHotkey(netuid);
               if (targetHotkey) {
+                let triggerTrace = null;
+                let triggerAfterBroadcast = null;
+                if (hasPublic) {
+                  triggerTrace = createTrace();
+                  triggerAfterBroadcast = [];
+                  traceLog(triggerTrace, 'SUCCESS', logMsg);
+                  triggerAfterBroadcast.push(() => sendTelegramAlert(coldkeyAnnouncedMsg).catch(() => {}));
+                }
                 executeArbitrageStake(
                   netuid,
                   targetHotkey,
                   settings.swapAmount,
                   '冷键交换抢跑',
                   settings.swapSlippageLimit,
-                  { oldColdkey: coldkey, detectedAt: now }
+                  {
+                    oldColdkey: coldkey,
+                    detectedAt: now,
+                    trace: triggerTrace,
+                    afterBroadcast: triggerAfterBroadcast
+                  }
                 );
               }
             } catch (err) {
@@ -1490,6 +1528,8 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
   const hasPublicWallet = privateWallet.hasPublic(activeWallets);
+  const trace = extraParams?.trace || createTrace();
+  const afterBroadcast = extraParams?.afterBroadcast || [];
   if (activeWallets.length === 0) {
     if (hasPublicWallet) {
       log('WARN', `[${label}] 触发抢跑，但没有加载启用任何小号钱包！`);
@@ -1590,14 +1630,16 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
   }
 
   if (hasPublicWallet) {
-    log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
+    traceLog(trace, 'INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
 
-    flashduty.sendAlert(
-      `TAOLI 启动抢跑机制 - ${label}`,
-      `目标子网: SN#${netuid}\n目标 Hotkey: ${hotkey}\n策略: ${label}\n抢跑金额: ${amountTao} TAO`,
-      settings,
-      log
-    ).catch(() => {});
+    afterBroadcast.push(() => {
+      flashduty.sendAlert(
+        `TAOLI 启动抢跑机制 - ${label}`,
+        `目标子网: SN#${netuid}\n目标 Hotkey: ${hotkey}\n策略: ${label}\n抢跑金额: ${amountTao} TAO`,
+        settings,
+        log
+      ).catch(() => {});
+    });
   }
 
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
@@ -1613,7 +1655,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
       }
 
       if (hasPublicWallet) {
-        log('INFO', `[${label}] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
+        traceLog(trace, 'INFO', `[${label}] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
       }
 
       for (const w of activeWallets) {
@@ -1629,7 +1671,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
           try {
             const tx = await buildStakeTx(hotkey, netuid, wAmountBigInt, slippageLimit);
             if (!privateWallet.isPrivate(w)) {
-              log('INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+              traceLog(trace, 'INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             }
 
             const p = sendStrategicTx(tx, w.pair, timeoutMs, {
@@ -1639,6 +1681,8 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
               slippageLimit,
               label: `${label}-轮次${attempt + 1}-并发#${i + 1}`,
               detectedAt: extraParams?.detectedAt || Date.now(),
+              trace,
+              afterBroadcast,
               isPrivate: privateWallet.isPrivate(w)
             }).then(res => {
               if (res.success) {
@@ -1745,7 +1789,7 @@ async function executeTimeoutRetry(
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
 
   const actualAmount = customAmount !== null ? customAmount : settings.dashingAmount;
-  const actualSlippageLimit = customSlippageLimit !== null ? customSlippageLimit : settings.dashingSlippageLimit;
+  const actualSlippageLimit = customSlippageLimit !== null ? customSlippageLimit : 0;
   const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
 
   // 确认 maxPriceLimit 的来源（支持参数传入或使用 settings 对应策略通道的默认配置）
@@ -1757,8 +1801,9 @@ async function executeTimeoutRetry(
   try {
     const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
 
-    // 调用 buildStakeTx，传入 actualMaxPriceLimit，由于重试没有缓存在 round 里的价格，传入 null 让其自动 RPC 获取最新价格
-    const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit, actualMaxPriceLimit, null);
+    const tx = baseLabel === '新子网打新'
+      ? buildFixedLimitStakeTx(targetHotkey, netuid, amountBigInt, actualMaxPriceLimit)
+      : await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit, actualMaxPriceLimit, null);
 
     const p = new Promise((resolve) => {
       sendStrategicTx(tx, w.pair, actualTimeoutMs, {
@@ -1844,10 +1889,13 @@ async function executeTimeoutRetry(
 // Staking Sniping execution (pure staking buy-in on newly registered subnet)
 // Note: hotkey parameter is kept for signature compatibility but ignored.
 // The function always resolves the active hotkey globally using resolveHotkey(netuid).
-async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') {
+async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown', detectedAt = null, extraParams = null) {
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
   const hasPublicWallet = privateWallet.hasPublic(activeWallets);
+  const trace = extraParams?.trace || createTrace();
+  const afterBroadcast = extraParams?.afterBroadcast || [];
+  const triggerDetectedAt = extraParams?.detectedAt || detectedAt;
 
   if (activeWallets.length === 0) {
     if (hasPublicWallet) {
@@ -1858,10 +1906,16 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
   const isDoubleStaking = triggerSource.startsWith('DoubleStaking');
-  const slippageLimit = isDoubleStaking && settings.dashingDoubleSlippageLimit !== undefined
-    ? settings.dashingDoubleSlippageLimit
-    : settings.dashingSlippageLimit;
   const retryLabel = isDoubleStaking ? '新子网打新:DoubleStaking' : '新子网打新:Primary';
+  const maxPriceLimit = isDoubleStaking && settings.dashingDoubleMaxPrice !== undefined
+    ? Number(settings.dashingDoubleMaxPrice || 0)
+    : Number(settings.dashingMaxPrice || 0);
+  if (!Number.isFinite(maxPriceLimit) || maxPriceLimit <= 0) {
+    if (hasPublicWallet) {
+      log('WARN', `[新子网打新] [触发源: ${triggerSource}] 策略 1 已改为固定最高限价模式，但未配置有效最高价格，取消打新。`);
+    }
+    return;
+  }
   if (!isDoubleStaking && activeSnipesByNetuid.has(netuid)) {
     if (hasPublicWallet) {
       log('INFO', `[新子网打新] [触发源: ${triggerSource}] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
@@ -1939,30 +1993,28 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   // 收集所有异步发出的交易 Promise，以实现动态解锁
   const txPromises = [];
-  let stoppedByPriceLimit = false;
 
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
 
-  // 获取最大价格限额
-  const maxPriceLimit = isDoubleStaking && settings.dashingDoubleMaxPrice !== undefined
-    ? Number(settings.dashingDoubleMaxPrice || 0)
-    : Number(settings.dashingMaxPrice || 0);
-
   if (hasPublicWallet) {
-    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大价格限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+    traceLog(trace, 'INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 固定最高限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
 
     if (!isDoubleStaking) {
-      flashduty.sendAlert(
-        `TAOLI 启动极速打新抢购机制`,
-        `触发源: ${triggerSource}\n目标子网: SN#${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: 主线打新\n打新金额: ${settings.dashingAmount} TAO`,
-        settings,
-        log
-      ).catch(() => {});
+      afterBroadcast.push(() => {
+        flashduty.sendAlert(
+          `TAOLI 启动极速打新抢购机制`,
+          `触发源: ${triggerSource}\n目标子网: SN#${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: 主线打新\n打新金额: ${settings.dashingAmount} TAO`,
+          settings,
+          log
+        ).catch(() => {});
+      });
     }
-    sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n最大价格限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
+    afterBroadcast.push(() => {
+      sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n固定最高限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`).catch(() => {});
+    });
   }
 
   try {
@@ -1975,31 +2027,8 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
         break;
       }
 
-      // 1. 在每轮扫射开始时集中只查一次价格，免去多个小号重复 RPC 带来的延迟
-      let currentPrice = null;
-      if (maxPriceLimit > 0 || (slippageLimit !== undefined && slippageLimit !== null && slippageLimit > 0)) {
-        currentPrice = await getSubnetPrice(netuid);
-      }
-
-      // 2. 如果价格超限，则标记价格保护并终止整轮扫射和后续尝试
-      if (maxPriceLimit > 0 && currentPrice !== null) {
-        const priceInTao = Number(currentPrice) / 1e9;
-        if (priceInTao > maxPriceLimit) {
-          if (hasPublicWallet) {
-            log('WARN', `⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`);
-            sendTelegramAlert(`⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`).catch(() => {});
-          }
-          stoppedByPriceLimit = true;
-          break; // 直接退出扫射循环
-        }
-      } else if (maxPriceLimit > 0 && currentPrice === null) {
-        if (hasPublicWallet) {
-          log('WARN', `⚠️ [新子网打新] 无法获取当前子网 #${netuid} 价格！已跳过前置限价校验，将自动降级为普通市价质押（addStake）强行买入，以优先保证打新速度！`);
-        }
-      }
-
       if (hasPublicWallet) {
-        log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
+        traceLog(trace, 'INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
       }
 
       for (const w of activeWallets) {
@@ -2008,10 +2037,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
         for (let i = 0; i < burstCount; i++) {
           try {
-            // 透传 currentPrice 避免内部重复查价格，降低 RPC 交互延迟
-            const tx = await buildStakeTx(targetHotkey, netuid, wAmountBigInt, slippageLimit, maxPriceLimit, currentPrice);
+            const tx = buildFixedLimitStakeTx(targetHotkey, netuid, wAmountBigInt, maxPriceLimit);
             if (!privateWallet.isPrivate(w)) {
-              log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+              traceLog(trace, 'INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             }
 
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
@@ -2019,8 +2047,11 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               netuid,
               hotkey: targetHotkey,
               amountBigInt: wAmountBigInt,
-              slippageLimit: slippageLimit,
+              maxPriceLimit,
               label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`,
+              detectedAt: triggerDetectedAt || Date.now(),
+              trace,
+              afterBroadcast,
               isPrivate: privateWallet.isPrivate(w)
             }).then(res => {
               if (res.success) {
@@ -2036,7 +2067,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
                   log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 }
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, wAmountTao, slippageLimit, maxPriceLimit, retryLabel).then(retryRes => ({ ...retryRes, isPrivate: privateWallet.isPrivate(w) }));
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, wAmountTao, null, maxPriceLimit, retryLabel).then(retryRes => ({ ...retryRes, isPrivate: privateWallet.isPrivate(w) }));
                 }
                 return { ...res, isPrivate: privateWallet.isPrivate(w) };
               }
@@ -2094,17 +2125,10 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       // 若一笔交易都未发出（例如 buildStakeTx 抛错），延迟短窗口解锁，防止下个区块到达时瞬间再次重复触发
       setTimeout(unlock, Math.max(3000, interval));
 
-      if (stoppedByPriceLimit) {
-        if (hasPublicWallet) {
-          const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
-          log('WARN', msg);
-        }
-      } else {
-        if (hasPublicWallet) {
-          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
-          log('ERROR', msg);
-          sendTelegramAlert(msg).catch(() => {});
-        }
+      if (hasPublicWallet) {
+        const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
+        log('ERROR', msg);
+        sendTelegramAlert(msg).catch(() => {});
       }
     }
   }

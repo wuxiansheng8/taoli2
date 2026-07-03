@@ -248,13 +248,9 @@
                 <input type="number" id="strat-dashing-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
               <div class="setting-item">
-                <label>允许的最大滑点 (Slippage Limit)</label>
-                <input type="number" id="strat-dashing-slippage" step="0.01" min="0" max="1" placeholder="留空为不限制">
-              </div>
-              <div class="setting-item">
-                <label>主线最大价格限制 (TAO/Alpha, 0为无限制)</label>
+                <label>主线最高限价 (TAO/Alpha)</label>
                 <input type="number" id="strat-dashing-max-price" step="0.0001" min="0" placeholder="例如: 1.5">
-                <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">注：若节点无法获取当前价格，机器人将自动降级为市价质押（普通 addStake 交易）强行成交，以优先保证打新速度。</span>
+                <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">策略 1 使用固定最高限价直接发单，不进行现场查价。</span>
               </div>
               <div class="setting-item">
                 <label>二次延迟买入时间 (秒，0为不进行)</label>
@@ -262,13 +258,9 @@
                 <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">注：当该值 > 0 时，即使策略 1 主开关关闭，仍会监听并执行二次延迟买入。</span>
               </div>
               <div class="setting-item">
-                <label>二次延迟允许的最大滑点 (Slippage Limit)</label>
-                <input type="number" id="strat-dashing-double-slippage" step="0.01" min="0" max="1" placeholder="留空为不限制">
-              </div>
-              <div class="setting-item">
-                <label>二次延迟最大价格限制 (TAO/Alpha, 0为无限制)</label>
+                <label>二次延迟最高限价 (TAO/Alpha)</label>
                 <input type="number" id="strat-dashing-double-max-price" step="0.0001" min="0" placeholder="例如: 1.0">
-                <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">注：若节点无法获取当前价格，机器人将自动降级为市价质押（普通 addStake 交易）强行成交，以优先保证打新速度。</span>
+                <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">二次延迟同样使用固定最高限价直接发单。</span>
               </div>
             </div>
           </div>
