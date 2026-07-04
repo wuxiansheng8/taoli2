@@ -133,6 +133,7 @@ const config = {
   flashDutyEnabled: false,
   flashDutyWebhookUrl: '',
   flashDutyCooldownMs: 300000,
+  mempoolPollIntervalMs: 1,
   dashingEnabled: true,
   dashingAmount: 100,
   dashingRetries: 10,
