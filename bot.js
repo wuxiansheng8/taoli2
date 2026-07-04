@@ -1410,6 +1410,27 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       }
 
       // 4. StakeAdded (质押成功 - 检查是否是我们的钱包)
+      // 5. FirstEmissionBlockNumberSet (通过 startCall 激活子网)
+      if (dashingActive && section === 'subtensorModule' && method === 'FirstEmissionBlockNumberSet') {
+        const netuid = Number(event.data[0].toString());
+        const blockNum = Number(event.data[1].toString());
+        const actionKey = `startCallConfirmed:${blockNumber}:${netuid}`;
+        if (!seenActions.has(actionKey)) {
+          seenActions.set(actionKey, now);
+          const logMsg = `🎉 [新子网打新] 目标子网 #${netuid} 的 startCall 激活事件已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易被正式确认（激活区块: #${blockNum}）！`;
+          log('SUCCESS', logMsg);
+          sendTelegramAlert(
+            `🎉 <b>[新子网打新 链上激活成功]</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
+            `• <b>生效区块</b>: <code>#${blockNum}</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<i>🎉 目标子网已被所有者正式激活！</i>`
+          ).catch(() => {});
+        }
+      }
+
       if (section === 'subtensorModule' && method === 'StakeAdded') {
         const coldkey = data[0];
         const hotkey = data[1];
@@ -1468,76 +1489,65 @@ async function detectEventsInBlock(blockHash, blockNumber) {
     const ext = extrinsics[extIndex];
     if (!ext || !ext.method) continue;
 
-    const sec = String(ext.method.section || '').trim();
-    const meth = String(ext.method.method || '').trim();
-
-    // Cheap string checks first to save CPU before parsing
-    const isRename = settings.renameEnabled &&
-      /^subtensor(Module)?$/i.test(sec) &&
-      /^(setSubnetIdentity|set_subnet_identity)$/i.test(meth);
-
-    const isStartCall = dashingActive &&
-      /^subtensor(Module)?$/i.test(sec) &&
-      /^(startCall|start_call)$/i.test(meth);
-
-    if (!isRename && !isStartCall) continue;
-
     try {
-      const parsed = parseExtrinsic(ext);
-      if (!parsed) continue;
+      const actions = extractSubtensorCalls(ext);
+      for (const parsed of actions) {
+        const sec = parsed.section;
+        const meth = parsed.callName;
 
-      // seenHashes 防重过滤
-      const entry = seenHashes.get(parsed.txHash);
-      if (entry && entry.handled) continue;
+        const isRename = settings.renameEnabled &&
+          /^subtensor(Module)?$/i.test(sec) &&
+          /^(setSubnetIdentity|set_subnet_identity)$/i.test(meth);
 
-      if (isRename) {
-        const triggerTrace = createTrace();
-        const triggerAfterBroadcast = [];
-        traceLog(triggerTrace, 'INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
-          trace: triggerTrace,
-          afterBroadcast: triggerAfterBroadcast
-        });
-        seenHashes.set(parsed.txHash, {
-          timestamp: now,
-          netuid: null,
-          tipTao: parsed.tipTao,
-          isRegisterNetwork: false,
-          handled: !!handled
-        });
-      } else if (isStartCall) {
-        const netuid = Number(parsed.args.netuid?.toString() || parsed.args[0]?.toString());
-        const triggerTrace = createTrace();
-        const triggerAfterBroadcast = [];
-        if (Number.isFinite(netuid) && netuid > 0) {
-          const actionKey = `startCallConfirmed:${blockNumber}:${netuid}`;
-          if (!seenActions.has(actionKey)) {
-            seenActions.set(actionKey, now);
-            const logMsg = `[新子网打新] 目标子网 #${netuid} 的 startCall 激活交易已于区块 #${blockNumber} 第 ${extIndex} 笔交易正式确认成功！`;
-            const startCallConfirmedMsg =
-              `🎉 <b>[新子网打新 链上激活成功]</b>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
-              `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-              `• <b>排队位置</b>: <code>第 ${extIndex} 笔交易</code>\n` +
-              `━━━━━━━━━━━━━━━━━━\n` +
-              `<i>🎉 子网已被所有者正式激活！</i>`;
-            traceLog(triggerTrace, 'SUCCESS', logMsg);
-            triggerAfterBroadcast.push(() => sendTelegramAlert(startCallConfirmedMsg).catch(() => {}));
+        const isStartCall = dashingActive &&
+          /^subtensor(Module)?$/i.test(sec) &&
+          /^(startCall|start_call)$/i.test(meth);
+
+        if (!isRename && !isStartCall) continue;
+
+        const callKey = getCallKey(parsed);
+        const entry = seenHashes.get(callKey);
+        if (entry && entry.handled) continue;
+
+        if (isRename) {
+          const triggerTrace = createTrace();
+          const triggerAfterBroadcast = [];
+          traceLog(triggerTrace, 'INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
+          const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
+            trace: triggerTrace,
+            afterBroadcast: triggerAfterBroadcast
+          });
+          seenHashes.set(callKey, {
+            timestamp: now,
+            netuid: null,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: false,
+            handled: !!handled
+          });
+        } else if (isStartCall) {
+          const netuid = Number(parsed.args.netuid?.toString() || parsed.args[0]?.toString());
+          const triggerTrace = createTrace();
+          const triggerAfterBroadcast = [];
+          if (Number.isFinite(netuid) && netuid > 0) {
+            const actionKey = `startCallConfirmed:${blockNumber}:${netuid}`;
+            if (!seenActions.has(actionKey)) {
+              seenActions.set(actionKey, now);
+              // 交易扫描层仅输出 INFO 日志记录捕获，具体的激活成功由 Event 抛出判定以防交易失败误报
+              log('INFO', `[区块兜底] 扫到子网 #${netuid} 的 startCall 交易，正在执行自愈判定...`);
+            }
           }
+          const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
+            trace: triggerTrace,
+            afterBroadcast: triggerAfterBroadcast
+          });
+          seenHashes.set(callKey, {
+            timestamp: now,
+            netuid: null,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: false,
+            handled: !!handled
+          });
         }
-        traceLog(triggerTrace, 'INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的 startCall 激活交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber, {
-          trace: triggerTrace,
-          afterBroadcast: triggerAfterBroadcast
-        });
-        seenHashes.set(parsed.txHash, {
-          timestamp: now,
-          netuid: null,
-          tipTao: parsed.tipTao,
-          isRegisterNetwork: false,
-          handled: !!handled
-        });
       }
     } catch (err) {
       // 单个 extrinsic 的执行/解析异常，不影响其他 extrinsic 运行
@@ -2327,44 +2337,49 @@ async function poll() {
           ext = api.createType('Extrinsic', hex.toString());
         }
 
-        const parsed = parseExtrinsic(ext);
-        if (!parsed) continue;
+        const actions = extractSubtensorCalls(ext);
+        if (actions.length === 0) continue;
 
-        let netuid = null;
-        if (parsed.args.netuid !== undefined) {
-          netuid = Number(parsed.args.netuid.toString());
-        } else if (parsed.args.destination_netuid !== undefined) {
-          netuid = Number(parsed.args.destination_netuid.toString());
-        } else if (parsed.args[1] !== undefined && typeof parsed.args[1].toNumber === 'function') {
-          netuid = parsed.args[1].toNumber();
-        }
+        for (const parsed of actions) {
+          let netuid = null;
+          if (parsed.args.netuid !== undefined) {
+            netuid = Number(parsed.args.netuid.toString());
+          } else if (parsed.args.destination_netuid !== undefined) {
+            netuid = Number(parsed.args.destination_netuid.toString());
+          } else if (parsed.args[1] !== undefined && typeof parsed.args[1].toNumber === 'function') {
+            netuid = parsed.args[1].toNumber();
+          } else if (parsed.args[0] !== undefined && /^(startCall|start_call)$/i.test(parsed.callName)) {
+            netuid = Number(parsed.args[0].toString());
+          }
 
-        const isReg = /^register(_)?network$/i.test(parsed.callName);
+          const isReg = /^register(_)?network$/i.test(parsed.callName);
 
-        const hashEntry = seenHashes.get(parsed.txHash);
-        if (hashEntry) {
-          if (hashEntry.handled) continue;
-          if (now - hashEntry.timestamp < 3000) continue; // 限制失败交易重试频率为最快每 3 秒一次，防止高频砸 RPC 节点和刷警告日志
-        }
+          const callKey = getCallKey(parsed);
+          const hashEntry = seenHashes.get(callKey);
+          if (hashEntry) {
+            if (hashEntry.handled) continue;
+            if (now - hashEntry.timestamp < 3000) continue;
+          }
 
-        if (/^subtensor(Module)?$/i.test(parsed.section) &&
-            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|startCall|start_call)$/i.test(parsed.callName)) {
-          const handled = await handlePendingExtrinsic(parsed, 'Mempool');
-          seenHashes.set(parsed.txHash, {
-            timestamp: now,
-            netuid,
-            tipTao: parsed.tipTao,
-            isRegisterNetwork: isReg,
-            handled: !!handled
-          });
-        } else {
-          seenHashes.set(parsed.txHash, {
-            timestamp: now,
-            netuid,
-            tipTao: parsed.tipTao,
-            isRegisterNetwork: isReg,
-            handled: true
-          });
+          if (/^subtensor(Module)?$/i.test(parsed.section) &&
+              /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|startCall|start_call)$/i.test(parsed.callName)) {
+            const handled = await handlePendingExtrinsic(parsed, 'Mempool');
+            seenHashes.set(callKey, {
+              timestamp: now,
+              netuid,
+              tipTao: parsed.tipTao,
+              isRegisterNetwork: isReg,
+              handled: !!handled
+            });
+          } else {
+            seenHashes.set(callKey, {
+              timestamp: now,
+              netuid,
+              tipTao: parsed.tipTao,
+              isRegisterNetwork: isReg,
+              handled: true
+            });
+          }
         }
       } catch (err) {
         // Silent error
@@ -2831,3 +2846,92 @@ module.exports = {
   setBlockCallback: (cb) => { global.blockCallback = cb; },
   clearCooldown
 };
+// ============================================================================
+// 递归交易解析器与精细去重键计算（解耦设计，支持 Polkadot-JS Codec）
+// ============================================================================
+
+function extractSubtensorCalls(ext) {
+  if (!ext || !ext.method) return [];
+  const signer = ext.signer ? ext.signer.toString() : 'unsigned';
+  const txHash = ext.hash ? ext.hash.toHex() : 'unknown';
+  const tipBigInt = ext.tip ? BigInt(ext.tip.toString()) : 0n;
+  const tipTao = Number(tipBigInt) / 1e9;
+  const nonce = ext.nonce !== undefined && ext.nonce !== null ? Number(ext.nonce.toString()) : null;
+
+  function recurse(call, currentPath = "0") {
+    if (!call) return [];
+    const section = String(call.section || '').trim();
+    const method = String(call.method || '').trim();
+
+    // 1. 处理 utility.batch / batch_all / force_batch
+    if (section === 'utility' && /^(batch|batchAll|batch_all|forceBatch|force_batch)$/i.test(method)) {
+      const firstArg = call.args && call.args[0];
+      const subcalls = (firstArg && typeof firstArg.toArray === 'function') ? firstArg.toArray() : (firstArg || []);
+      let list = [];
+      for (let i = 0; i < subcalls.length; i++) {
+        list = list.concat(recurse(subcalls[i], `${currentPath}.${i}`));
+      }
+      return list;
+    }
+
+    // 2. 处理 proxy.proxy / proxy_announced
+    if (section === 'proxy' && /^(proxy|proxyAnnounced|proxy_announced)$/i.test(method)) {
+      const argsList = (call.args && typeof call.args.toArray === 'function') ? call.args.toArray() : (call.args || []);
+      for (let i = 0; i < argsList.length; i++) {
+        const arg = argsList[i];
+        let unwrapped = arg;
+        if (arg && typeof arg.unwrap === 'function' && typeof arg.isSome === 'boolean' && arg.isSome) {
+          unwrapped = arg.unwrap();
+        }
+        if (unwrapped && typeof unwrapped.section === 'string' && typeof unwrapped.method === 'string') {
+          return recurse(unwrapped, `${currentPath}.p${i}`);
+        }
+      }
+    }
+
+    // 3. 提取常规操作参数
+    const args = {};
+    const argsArray = (call.args && typeof call.args.toArray === 'function') ? call.args.toArray() : (call.args || []);
+    for (let i = 0; i < argsArray.length; i++) {
+      args[i] = argsArray[i];
+    }
+    if (call.meta && call.meta.args) {
+      const metaArgs = (call.meta.args && typeof call.meta.args.toArray === 'function') ? call.meta.args.toArray() : (call.meta.args || []);
+      for (let i = 0; i < metaArgs.length; i++) {
+        const argMeta = metaArgs[i];
+        const name = argMeta.name.toString();
+        args[name] = argsArray[i];
+      }
+    }
+
+    return [{
+      section,
+      callName: method,
+      signer,
+      txHash,
+      callPath: currentPath,
+      args,
+      tipTao,
+      nonce
+    }];
+  }
+
+  return recurse(ext.method);
+}
+
+function getCallKey(parsed) {
+  let netuid = 'none';
+  if (parsed.args) {
+    if (parsed.args.netuid !== undefined) {
+      netuid = parsed.args.netuid.toString();
+    } else if (parsed.args.destination_netuid !== undefined) {
+      netuid = parsed.args.destination_netuid.toString();
+    } else if (parsed.args[1] !== undefined) {
+      netuid = parsed.args[1].toString();
+    } else if (parsed.args[0] !== undefined && /^(startCall|start_call)$/i.test(parsed.callName)) {
+      netuid = parsed.args[0].toString();
+    }
+  }
+  const callPath = parsed.callPath || '0';
+  return `${parsed.txHash}:${callPath}:${parsed.section}:${parsed.callName}:${netuid}`;
+}
