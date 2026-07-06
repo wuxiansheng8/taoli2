@@ -1613,13 +1613,13 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
   if (label === '改名抢跑') {
     burstCount = Math.max(1, settings.renameBurstCount || 1);
     retries = Math.max(1, settings.renameRetries || 1);
-    interval = Math.max(50, settings.renameIntervalMs || 1000);
+    interval = Math.max(1, settings.renameIntervalMs || 1000);
     timeoutMs = Math.max(1000, settings.renameTimeoutMs || 30000);
     timeoutRetries = Math.max(0, settings.renameTimeoutRetries || 0);
   } else if (label === '冷键交换抢跑') {
     burstCount = Math.max(1, settings.swapBurstCount || 1);
     retries = Math.max(1, settings.swapRetries || 1);
-    interval = Math.max(50, settings.swapIntervalMs || 1000);
+    interval = Math.max(1, settings.swapIntervalMs || 1000);
     timeoutMs = Math.max(1000, settings.swapTimeoutMs || 30000);
     timeoutRetries = Math.max(0, settings.swapTimeoutRetries || 0);
   }
@@ -2063,7 +2063,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown', 
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
-  const interval = Math.max(50, settings.dashingIntervalMs || 1000);
+  const interval = Math.max(1, settings.dashingIntervalMs || 1000);
 
   if (hasPublicWallet) {
     traceLog(trace, 'INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 固定最高限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
