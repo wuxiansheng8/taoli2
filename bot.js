@@ -480,6 +480,9 @@ async function reloadWallets(actionContext = null) {
   // 调用独立模块静默加载私人钱包
   privateWallet.initAndLoadPrivateWallets(keyring, newWallets);
 
+  // 预热所有真实钱包 pair 的首次签名上下文，避免第一次抢跑时才付首签开销。
+  preheater.warmWalletPairs(newWallets, log);
+
   wallets = newWallets;
   await refreshAllWallets();
 }
@@ -718,6 +721,25 @@ function parseExtrinsic(ext) {
   }
 }
 
+function codecToSortableBigInt(value) {
+  if (value === null || value === undefined) return 0n;
+
+  const json = typeof value.toJSON === 'function' ? value.toJSON() : value;
+  if (json && typeof json === 'object' && !Array.isArray(json) && 'bits' in json) {
+    return codecToSortableBigInt(json.bits);
+  }
+  if (typeof json === 'bigint') return json;
+  if (typeof json === 'number') return BigInt(Math.trunc(json));
+  if (typeof json === 'string') {
+    const normalized = json.replace(/,/g, '').trim();
+    return normalized.startsWith('0x') ? BigInt(normalized) : BigInt(normalized || '0');
+  }
+
+  const raw = value.toString ? value.toString() : String(value);
+  const normalized = raw.replace(/,/g, '').trim();
+  return normalized.startsWith('0x') ? BigInt(normalized) : BigInt(normalized || '0');
+}
+
 // Compute next subnet to prune based on Yuma Consensus rules
 async function getNextPruneCandidate(currentBlock) {
   let pruneNetuidVal = null;
@@ -775,43 +797,45 @@ async function getNextPruneCandidate(currentBlock) {
     }
   }
 
-  // 降级使用批量多包并发查询进行本地 Yuma 规则计算
+  // 降级使用批量多包并发查询，按链上 get_network_to_prune 规则本地计算
   try {
-    const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
-    const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
+    const networkEntries = await api.query.subtensorModule.networksAdded.entries();
+    const activeNetuids = networkEntries
+      .filter(([, added]) => added?.toJSON?.() === true || added?.toString?.() === 'true')
+      .map(([key]) => key.args[0].toNumber())
+      .filter(netuid => netuid !== 0);
 
     if (activeNetuids.length === 0) return null;
 
-    // Batch query network parameters to minimize RPC roundtrips from 384 sequential queries to 3 batch queries
-    const [registeredAtVals, immunityPeriodVals, emissionVals] = await Promise.all([
+    // 链上规则: 跳过免疫期内子网后，按 moving alpha price 最低选择；同价时选注册最早。
+    const [registeredAtVals, movingPriceVals, networkImmunityPeriodVal] = await Promise.all([
       api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids),
-      api.query.subtensorModule.immunityPeriod.multi(activeNetuids),
-      api.query.subtensorModule.emission.multi(activeNetuids)
+      api.query.subtensorModule.subnetMovingPrice.multi(activeNetuids),
+      api.query.subtensorModule.networkImmunityPeriod()
     ]);
 
     let bestCandidate = null;
-    let lowestEmission = null;
+    let lowestMovingPrice = null;
     let earliestRegisteredAt = null;
 
     for (let i = 0; i < activeNetuids.length; i++) {
       const netuid = activeNetuids[i];
       const registeredAtVal = registeredAtVals[i];
-      const immunityPeriodVal = immunityPeriodVals[i];
-      const emissionVal = emissionVals[i];
+      const movingPriceVal = movingPriceVals[i];
 
       const registeredAt = Number(registeredAtVal?.toString() || 0);
-      const immunityPeriod = Number(immunityPeriodVal?.toString() || 0);
-      const emission = BigInt(emissionVal?.toString() || 0);
+      const networkImmunityPeriod = Number(networkImmunityPeriodVal?.toString() || 0);
+      const movingPrice = codecToSortableBigInt(movingPriceVal);
 
-      // Check if past immunity period
-      if (currentBlock - registeredAt >= immunityPeriod) {
+      // Check if past global network immunity period
+      if (currentBlock >= registeredAt && currentBlock - registeredAt >= networkImmunityPeriod) {
         if (
           bestCandidate === null ||
-          emission < lowestEmission ||
-          (emission === lowestEmission && registeredAt < earliestRegisteredAt)
+          movingPrice < lowestMovingPrice ||
+          (movingPrice === lowestMovingPrice && registeredAt < earliestRegisteredAt)
         ) {
           bestCandidate = netuid;
-          lowestEmission = emission;
+          lowestMovingPrice = movingPrice;
           earliestRegisteredAt = registeredAt;
         }
       }

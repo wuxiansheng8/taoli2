@@ -68,7 +68,32 @@ function stopPreheating() {
   }
 }
 
+function warmWalletPairs(walletList, logFn = null) {
+  const total = Array.isArray(walletList) ? walletList.length : 0;
+  const message = Buffer.from('taoli-wallet-pair-warmup');
+  const start = Date.now();
+  let warmed = 0;
+
+  for (const w of walletList || []) {
+    try {
+      if (!w || !w.pair || typeof w.pair.sign !== 'function') continue;
+      w.pair.sign(message);
+      warmed++;
+    } catch (e) {
+      // 预热失败不影响钱包加载和抢跑，只跳过这个 pair。
+    }
+  }
+
+  const duration = Date.now() - start;
+  if (typeof logFn === 'function') {
+    logFn('INFO', `[预热器] 已预热 ${warmed}/${total} 个真实钱包签名上下文，耗时 ${duration}ms。`);
+  }
+
+  return { warmed, total, duration };
+}
+
 module.exports = {
   startPreheating,
-  stopPreheating
+  stopPreheating,
+  warmWalletPairs
 };
