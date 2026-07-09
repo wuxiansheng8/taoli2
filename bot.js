@@ -1452,6 +1452,19 @@ async function detectEventsInBlock(blockHash, blockNumber) {
             `━━━━━━━━━━━━━━━━━━\n` +
             `<i>🎉 目标子网已被所有者正式激活！</i>`
           ).catch(() => {});
+
+          // 极简事件自愈兜底：仅在主打新开启且未曾被触发时挂载
+          const mainTriggerKey = `startCall:${netuid}`;
+          if (!seenActions.has(mainTriggerKey) && settings.dashingEnabled) {
+            seenActions.set(mainTriggerKey, now);
+            resolveHotkey(netuid).then(targetHotkey => {
+              if (targetHotkey) {
+                executeStakingSniping(netuid, targetHotkey, 'Event-Fallback-startCall', now).catch(e => {
+                  log('ERROR', `[新子网打新] 事件层自愈兜底买入失败: ${e.message}`);
+                });
+              }
+            }).catch(() => {});
+          }
         }
       }
 
@@ -2882,25 +2895,32 @@ function extractSubtensorCalls(ext) {
   const tipTao = Number(tipBigInt) / 1e9;
   const nonce = ext.nonce !== undefined && ext.nonce !== null ? Number(ext.nonce.toString()) : null;
 
-  function recurse(call, currentPath = "0") {
+  function recurse(call, currentPath = "0", currentSigner = signer) {
     if (!call) return [];
     const section = String(call.section || '').trim();
     const method = String(call.method || '').trim();
 
-    // 1. 处理 utility.batch / batch_all / force_batch
     if (section === 'utility' && /^(batch|batchAll|batch_all|forceBatch|force_batch)$/i.test(method)) {
       const firstArg = call.args && call.args[0];
       const subcalls = (firstArg && typeof firstArg.toArray === 'function') ? firstArg.toArray() : (firstArg || []);
       let list = [];
       for (let i = 0; i < subcalls.length; i++) {
-        list = list.concat(recurse(subcalls[i], `${currentPath}.${i}`));
+        list = list.concat(recurse(subcalls[i], `${currentPath}.${i}`, currentSigner));
       }
       return list;
     }
 
-    // 2. 处理 proxy.proxy / proxy_announced
     if (section === 'proxy' && /^(proxy|proxyAnnounced|proxy_announced)$/i.test(method)) {
       const argsList = (call.args && typeof call.args.toArray === 'function') ? call.args.toArray() : (call.args || []);
+      
+      let real = null;
+      if (/^proxy$/i.test(method)) {
+        real = argsList[0];
+      } else if (/^(proxyAnnounced|proxy_announced)$/i.test(method)) {
+        real = argsList[1];
+      }
+      const realAddress = real ? real.toString() : currentSigner;
+
       for (let i = 0; i < argsList.length; i++) {
         const arg = argsList[i];
         let unwrapped = arg;
@@ -2908,12 +2928,11 @@ function extractSubtensorCalls(ext) {
           unwrapped = arg.unwrap();
         }
         if (unwrapped && typeof unwrapped.section === 'string' && typeof unwrapped.method === 'string') {
-          return recurse(unwrapped, `${currentPath}.p${i}`);
+          return recurse(unwrapped, `${currentPath}.p${i}`, realAddress);
         }
       }
     }
 
-    // 3. 提取常规操作参数
     const args = {};
     const argsArray = (call.args && typeof call.args.toArray === 'function') ? call.args.toArray() : (call.args || []);
     for (let i = 0; i < argsArray.length; i++) {
@@ -2931,7 +2950,7 @@ function extractSubtensorCalls(ext) {
     return [{
       section,
       callName: method,
-      signer,
+      signer: currentSigner,
       txHash,
       callPath: currentPath,
       args,
