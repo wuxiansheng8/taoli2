@@ -359,6 +359,49 @@
             </div>
           </div>
 
+          <!-- Strategy 4: TAO-side Emission Enable Frontrun -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>⚡ 策略 4: TAO 侧排放开启抢跑</h3>
+                <p class="card-desc">可信的 Sudo 开启指令触发抢买；Pending 漏扫时由链上事件兜底，禁止排放只记录日志。</p>
+              </div>
+              <div class="strategy-action-group">
+                <button type="button" class="btn btn-secondary btn-sm btn-clear-cooldown" data-strategy="emission-frontrun">清理状态</button>
+                <label class="switch">
+                  <input type="checkbox" id="strat-emission-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="strategy-settings grid-settings-2-rows">
+              <div class="setting-item">
+                <label>抢跑金额 (TAO)</label>
+                <input type="number" id="strat-emission-amount" step="1" min="1">
+              </div>
+              <div class="setting-item">
+                <label>单轮并发笔数 (Burst Count)</label>
+                <input type="number" id="strat-emission-burst" min="1" max="10">
+              </div>
+              <div class="setting-item">
+                <label>最大扫射轮数</label>
+                <input type="number" id="strat-emission-retries" min="1" max="100">
+              </div>
+              <div class="setting-item">
+                <label>扫射间隔 (ms)</label>
+                <input type="number" id="strat-emission-interval" min="1">
+              </div>
+              <div class="setting-item">
+                <label>交易超时时间 (ms)</label>
+                <input type="number" id="strat-emission-timeout" min="1000">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (0.05 = 5%)</label>
+                <input type="number" id="strat-emission-slippage" step="0.01" min="0.0001" max="1">
+              </div>
+            </div>
+          </div>
+
           <!-- Global Hotkey Setting -->
           <div class="card glass strategy-card">
             <div class="strategy-header">

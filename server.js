@@ -275,7 +275,7 @@ app.post('/api/wallets/reload', requireAuth, async (req, res) => {
 app.post('/api/cooldown/clear', requireAuth, (req, res) => {
   const { strategy } = req.body;
   
-  const allowedStrategies = ['new-subnet', 'rename', 'coldkey-swap'];
+  const allowedStrategies = ['new-subnet', 'rename', 'coldkey-swap', 'emission-frontrun'];
   if (!strategy || !allowedStrategies.includes(strategy)) {
     return res.status(400).json({ success: false, error: '无效的策略类型！' });
   }

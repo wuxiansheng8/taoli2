@@ -21,5 +21,12 @@
   "dashingDoubleMaxPrice": 0,
   "renameEnabled": true,
   "swapEnabled": true,
+  "emissionEnabled": false,
+  "emissionAmount": 100,
+  "emissionSlippageLimit": 0.05,
+  "emissionRetries": 1,
+  "emissionIntervalMs": 1000,
+  "emissionTimeoutMs": 30000,
+  "emissionBurstCount": 1,
   "nonceSyncIntervalSeconds": 60
 }

@@ -329,6 +329,14 @@ async function loadConfig() {
     document.getElementById('strat-swap-interval').value = cfg.swapIntervalMs !== undefined ? cfg.swapIntervalMs : 1000;
     document.getElementById('strat-swap-timeout').value = cfg.swapTimeoutMs !== undefined ? cfg.swapTimeoutMs : 30000;
     document.getElementById('strat-swap-timeout-retries').value = cfg.swapTimeoutRetries !== undefined ? cfg.swapTimeoutRetries : 0;
+
+    document.getElementById('strat-emission-enabled').checked = cfg.emissionEnabled === true;
+    document.getElementById('strat-emission-amount').value = cfg.emissionAmount !== undefined ? cfg.emissionAmount : 100;
+    document.getElementById('strat-emission-burst').value = cfg.emissionBurstCount !== undefined ? cfg.emissionBurstCount : 1;
+    document.getElementById('strat-emission-retries').value = cfg.emissionRetries !== undefined ? cfg.emissionRetries : 1;
+    document.getElementById('strat-emission-interval').value = cfg.emissionIntervalMs !== undefined ? cfg.emissionIntervalMs : 1000;
+    document.getElementById('strat-emission-timeout').value = cfg.emissionTimeoutMs !== undefined ? cfg.emissionTimeoutMs : 30000;
+    document.getElementById('strat-emission-slippage').value = cfg.emissionSlippageLimit !== undefined ? cfg.emissionSlippageLimit : 0.05;
     
     // Global Default Hotkey
     document.getElementById('cfg-default-hotkey').value = cfg.defaultHotkey || '';
@@ -369,6 +377,13 @@ async function saveStrategies() {
     return;
   }
 
+  const emissionEnabled = document.getElementById('strat-emission-enabled').checked;
+  const emissionSlippageLimit = Number(document.getElementById('strat-emission-slippage').value || 0);
+  if (emissionEnabled && (emissionSlippageLimit <= 0 || emissionSlippageLimit > 1)) {
+    alert('【策略4校验失败】：最大滑点必须大于 0 且不超过 1，例如 0.05 表示 5%。');
+    return;
+  }
+
   const payload = {
     dashingEnabled: dashingEnabled,
     dashingAmount: Number(document.getElementById('strat-dashing-amount').value),
@@ -395,6 +410,14 @@ async function saveStrategies() {
     swapIntervalMs: Number(document.getElementById('strat-swap-interval').value || 1000),
     swapTimeoutMs: Number(document.getElementById('strat-swap-timeout').value || 30000),
     swapTimeoutRetries: Number(document.getElementById('strat-swap-timeout-retries').value || 0),
+
+    emissionEnabled,
+    emissionAmount: Number(document.getElementById('strat-emission-amount').value || 100),
+    emissionBurstCount: Number(document.getElementById('strat-emission-burst').value || 1),
+    emissionRetries: Number(document.getElementById('strat-emission-retries').value || 1),
+    emissionIntervalMs: Number(document.getElementById('strat-emission-interval').value || 1000),
+    emissionTimeoutMs: Number(document.getElementById('strat-emission-timeout').value || 30000),
+    emissionSlippageLimit,
     
     // Slippage Limits
     dashingMaxPrice: dashingMaxPrice,
@@ -761,15 +784,20 @@ document.querySelectorAll('.btn-clear-cooldown').forEach(btn => {
     const strategyNamesMap = {
       'new-subnet': '策略 1 (新建立子网 Staking 抢购)',
       'rename': '策略 2 (子网改名抢跑)',
-      'coldkey-swap': '策略 3 (冷键交换声明/执行抢跑)'
+      'coldkey-swap': '策略 3 (冷键交换声明/执行抢跑)',
+      'emission-frontrun': '策略 4 (TAO 侧排放开启抢跑)'
     };
     const strategyDisplayName = strategyNamesMap[strategy] || strategy;
+    const stateOnly = strategy === 'emission-frontrun';
+    const confirmationText = stateOnly
+      ? `确认要清理 ${strategyDisplayName} 的本轮运行状态吗？\n\n请确认当前没有正在执行中的抢跑交易，否则可能导致重复买入。`
+      : `确认要清理 ${strategyDisplayName} 的冷却与运行锁吗？\n\n该操作会删除 24 小时冷却、成功状态缓存，并强制释放当前策略的运行锁。\n\n请确认当前没有正在执行中的抢跑交易，否则可能导致重复买入。`;
     
     // 显示浏览器自带的确认框
-    if (confirm(`确认要清理 ${strategyDisplayName} 的冷却与运行锁吗？\n\n该操作会删除 24 小时冷却、成功状态缓存，并强制释放当前策略的运行锁。\n\n请确认当前没有正在执行中的抢跑交易，否则可能导致重复买入。`)) {
+    if (confirm(confirmationText)) {
+      const origText = btn.innerText;
       try {
         btn.disabled = true;
-        const origText = btn.innerText;
         btn.innerText = '清理中...';
         
         // 调用封装好的 apiFetch，自动携带 Bearer Token 和 Content-Type
@@ -787,7 +815,7 @@ document.querySelectorAll('.btn-clear-cooldown').forEach(btn => {
         alert('清理出错: ' + e.message);
       } finally {
         btn.disabled = false;
-        btn.innerText = '清理冷却';
+        btn.innerText = origText;
       }
     }
   };

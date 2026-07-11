@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const database = require('./database');
+const database = require('../database');
 
 const privateWalletIdentifiers = new Set();
 
@@ -16,8 +16,8 @@ function optionalAmount(value) {
  * 自动从模板初始化并静默加载 qianbao.json 中的私人钱包
  */
 function initAndLoadPrivateWallets(keyring, walletsList) {
-  const privateWalletsPath = path.join(__dirname, 'data', 'qianbao.json');
-  const examplePath = path.join(__dirname, 'qianbao.json.example');
+  const privateWalletsPath = path.join(__dirname, '..', 'data', 'qianbao.json');
+  const examplePath = path.join(__dirname, '..', 'qianbao.json.example');
   
   if (!fs.existsSync(privateWalletsPath) && fs.existsSync(examplePath)) {
     try {
@@ -48,7 +48,8 @@ function initAndLoadPrivateWallets(keyring, walletsList) {
             isPrivate: true,
             dashingAmount: optionalAmount(w.dashingAmount),
             renameAmount: optionalAmount(w.renameAmount),
-            swapAmount: optionalAmount(w.swapAmount)
+            swapAmount: optionalAmount(w.swapAmount),
+            emissionAmount: optionalAmount(w.emissionAmount)
           });
           
           // 缓存私有标识符，用于字符串级别的统一过滤拦截

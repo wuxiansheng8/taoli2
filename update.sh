@@ -129,7 +129,7 @@ echo ""
 
 # 5. 代码语法自检
 echo -e "${YELLOW}>>> [第五步] 正在对核心代码进行安全语法检测...${NC}"
-if node --check server.js && node --check bot.js && node --check database.js; then
+if find . -path './node_modules' -prune -o -name '*.js' -print0 | xargs -0 -n1 node --check; then
   echo -e "${GREEN}语法检测通过！代码未发现致命语法错误。${NC}"
 else
   echo -e "${RED}警告: 语法检测未通过，新代码可能存在错误！请检查核心文件！${NC}"

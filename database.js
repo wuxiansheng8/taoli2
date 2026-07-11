@@ -92,6 +92,15 @@ const DEFAULT_SETTINGS = {
   swapTimeoutMs: 30000,
   swapBurstCount: 1,
   swapTimeoutRetries: 0,
+
+  // Strategy: TAO-side Emission Enable Frontrun
+  emissionEnabled: false,
+  emissionAmount: 100,
+  emissionSlippageLimit: 0.05,
+  emissionRetries: 1,
+  emissionIntervalMs: 1000,
+  emissionTimeoutMs: 30000,
+  emissionBurstCount: 1,
   
   // Advanced priorities
   allowPartialStaking: true, // allow partial fill on limit orders
@@ -208,6 +217,12 @@ function saveSettings(settings) {
     settingsCache = { ...DEFAULT_SETTINGS, ...cleanSettings(settings) };
     fs.promises.writeFile(SETTINGS_FILE, JSON.stringify(settingsCache, null, 2), 'utf8')
       .catch(e => console.error('Error async writing settings:', e));
+
+    // 主动清空 config.js 的一秒缓存，使 Web 端修改即刻生效
+    try {
+      require('./src/config').invalidate();
+    } catch (err) {}
+
     return true;
   } catch (e) {
     console.error('Error writing settings file:', e);
@@ -339,7 +354,11 @@ function clearCooldownsByStrategy(strategyPrefix) {
     
     for (const key in cooldownsCache) {
       if (
-        (strategyPrefix === 'new-subnet' && (key.startsWith('new-subnet:') || key.startsWith('new-subnet-double:'))) ||
+        (strategyPrefix === 'new-subnet' && (
+          key.startsWith('new-subnet:') ||
+          key.startsWith('new-subnet-primary:') ||
+          key.startsWith('new-subnet-double:')
+        )) ||
         (strategyPrefix === 'rename' && key.startsWith('rename:')) ||
         (strategyPrefix === 'coldkey-swap' && key.startsWith('coldkey-swap:'))
       ) {
