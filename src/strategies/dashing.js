@@ -110,10 +110,14 @@ async function handleStartCall(parsed, fallbackSource = 'Mempool', blockNum = nu
             traceLog(trace, 'INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
             afterBroadcast.push(() => sendTelegramAlert(tgMsg).catch(() => {}));
             executeStakingSniping(netuid, targetHotkey, triggerSrc, now, { trace, afterBroadcast }).catch(e => {
+              state.deleteAction(actionKey);
               log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
             });
           } else {
-            executeStakingSniping(netuid, targetHotkey, triggerSrc, now).catch(() => {});
+            executeStakingSniping(netuid, targetHotkey, triggerSrc, now).catch(e => {
+              state.deleteAction(actionKey);
+              log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
+            });
           }
         } else {
           if (hasPublic) {

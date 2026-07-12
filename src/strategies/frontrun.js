@@ -1,8 +1,7 @@
-const database = require('../../database');
 const state = require('../state');
 const config = require('../config');
 const { log, createTrace, traceLog } = require('../logger');
-const { sendTelegramAlert } = require('../notifier');
+const { sendTelegramAlert, escapeHtml } = require('../notifier');
 const { executeStrategy } = require('./executor');
 const subtensorClient = require('../chain/subtensorClient');
 const subnetCache = require('../chain/subnetCache');
@@ -103,6 +102,9 @@ async function handleRename(parsed, fallbackSource = 'Mempool', blockNum = null,
             detectedAt: now,
             trace: triggerTrace,
             afterBroadcast: triggerAfterBroadcast
+          }).catch(error => {
+            state.deleteAction(actionKey);
+            log('ERROR', `[改名抢跑] 执行抢跑失败: ${error.message}`);
           });
         } else {
           if (hasPublic) {
@@ -199,6 +201,10 @@ async function handleColdkeySwap(parsed, fallbackSource = 'Mempool', blockNum = 
                 detectedAt: now,
                 trace: triggerTrace,
                 afterBroadcast: triggerAfterBroadcast
+              }).catch(error => {
+                state.deleteAction(actionKey);
+                state.deleteAction(subActionKey);
+                log('ERROR', `[冷键交换抢跑] 子网 #${netuid} 执行抢跑失败: ${error.message}`);
               });
             } else {
               if (hasPublic) {
