@@ -12,6 +12,9 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
   const blockLine = txResult.blockNumber
     ? `• <b>成交区块</b>: <code>#${txResult.blockNumber}</code>\n`
     : '';
+  const indexLine = txResult.txIndex !== null && txResult.txIndex !== undefined
+    ? `• <b>排队位置</b>: <code>第 ${txResult.txIndex} 笔交易</code>\n`
+    : '';
   const message =
     `✅ <b>[策略4 TAO侧排放抢跑成功]</b>\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
@@ -19,6 +22,7 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
     `• <b>成功钱包</b>: <code>${escapeHtml(walletName)}</code>\n` +
     `• <b>触发来源</b>: <code>${run.source}</code>\n` +
     blockLine +
+    indexLine +
     `• <b>交易哈希</b>: <code>${txResult.hash}</code>\n` +
     `━━━━━━━━━━━━━━━━━━`;
 
@@ -28,6 +32,7 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
     `钱包 ${walletName} 已在子网 #${run.netuid} 成功提交 TAO 质押。交易哈希: ${txResult.hash}`,
     settings
   ).catch(() => {});
+  log('SUCCESS', `[策略4/成功] 来源: ${run.source} | 子网: #${run.netuid} | 钱包【${walletName}】| 成交区块: #${txResult.blockNumber || '未知'} | 位置: ${txResult.txIndex ?? '未知'} | 总耗时: ${Date.now() - run.detectedAt}ms | 哈希: ${txResult.hash}`);
 }
 
 async function executeRun(run, wallets, hotkey, settings) {
@@ -42,6 +47,10 @@ async function executeRun(run, wallets, hotkey, settings) {
     const intervalMs = Math.max(1, Number(settings.emissionIntervalMs) || 1000);
     const timeoutMs = Math.max(1000, Number(settings.emissionTimeoutMs) || 30000);
     const txPromises = [];
+
+    if (run.publicWalletCount > 0) {
+      log('INFO', `[策略4/执行] 来源: ${run.source} | 子网: #${run.netuid} | 目标 Hotkey: ${hotkey} | 当前价格: ${(Number(currentPrice) / 1e9).toFixed(6)} TAO/Alpha | 普通钱包数: ${run.publicWalletCount} | 单轮并发: ${burstCount} | 最大轮数: ${retries} | 间隔: ${intervalMs}ms`);
+    }
 
     for (let attempt = 0; attempt < retries; attempt++) {
       if (attempt > 0 && run.status === 'success') break;
@@ -60,6 +69,9 @@ async function executeRun(run, wallets, hotkey, settings) {
         const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
         for (let burst = 0; burst < burstCount; burst++) {
           try {
+            if (!wallet.isPrivate) {
+              log('INFO', `[策略4/发送] 来源: ${run.source} | 子网: #${run.netuid} | 钱包【${wallet.name}】| 金额: ${amountTao} TAO | 轮次: ${attempt + 1}/${retries} | 并发: ${burst + 1}/${burstCount} | 距触发: ${Date.now() - run.detectedAt}ms`);
+            }
             const tx = transactionService.buildCachedSlippageStakeTx(
               hotkey,
               run.netuid,
@@ -82,7 +94,7 @@ async function executeRun(run, wallets, hotkey, settings) {
                   notifySuccessOnce(run, wallet.name, result, settings);
                 }
               } else if (!wallet.isPrivate) {
-                log('ERROR', `[策略4] 钱包【${wallet.name}】交易失败: ${result.error}`);
+                log('ERROR', `[策略4/失败] 来源: ${run.source} | 子网: #${run.netuid} | 钱包【${wallet.name}】| 轮次: ${attempt + 1}/${retries} | 并发: ${burst + 1}/${burstCount} | 原因: ${result.error}`);
               }
               return result;
             });
@@ -112,7 +124,7 @@ async function executeRun(run, wallets, hotkey, settings) {
   }
 }
 
-function trigger({ netuid, source, triggerId }) {
+function trigger({ netuid, source, triggerId, triggerBlock = null, callPath = null }) {
   const settings = config.getSettings();
   if (!settings.emissionEnabled) {
     return false;
@@ -146,10 +158,21 @@ function trigger({ netuid, source, triggerId }) {
     netuid,
     source,
     triggerId,
+    triggerBlock,
+    callPath,
     detectedAt: Date.now(),
     status: 'running',
-    alerted: false
+    alerted: false,
+    publicWalletCount: wallets.filter(wallet => !wallet.isPrivate).length
   };
+
+  if (run.publicWalletCount > 0) {
+    const detail = triggerBlock
+      ? `确认区块: #${triggerBlock}`
+      : `原始交易: ${triggerId}${callPath ? ` | 调用路径: ${callPath}` : ''}`;
+    const channel = source.startsWith('Mempool') ? 'Pending' : '区块兜底';
+    log('INFO', `[策略4/${channel}] 检测到子网 #${netuid} 开启排放 | ${detail}`);
+  }
   state.emissionRuns.set(netuid, run);
   executeRun(run, wallets, hotkey, settings);
   return true;

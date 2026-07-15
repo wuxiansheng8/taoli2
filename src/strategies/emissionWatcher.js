@@ -45,10 +45,18 @@ function handlePendingExtrinsic(parsed) {
     return true;
   }
 
+  const wrappers = Array.isArray(parsed.wrappers) ? parsed.wrappers : [];
+  const source = wrappers.some(wrapper => wrapper.section === 'multisig')
+    ? 'Mempool-Multisig-Sudo'
+    : 'Mempool-Sudo';
   emissionFrontrun.trigger({
     netuid: control.netuid,
-    source: 'Mempool-Sudo',
-    triggerId: parsed.txHash
+    source,
+    triggerId: parsed.txHash,
+    callPath: [
+      ...wrappers.map(wrapper => `${wrapper.section}.${wrapper.method}`),
+      `${parsed.section}.${parsed.callName}`
+    ].join(' -> ')
   });
   return true;
 }
@@ -76,7 +84,8 @@ function handleBlockEvent(event, blockNumber) {
     emissionFrontrun.trigger({
       netuid: event.netuid,
       source: 'Block-Event-Fallback',
-      triggerId: `block:${blockNumber}:netuid:${event.netuid}`
+      triggerId: `block:${blockNumber}:netuid:${event.netuid}`,
+      triggerBlock: blockNumber
     });
   }
 }

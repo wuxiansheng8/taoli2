@@ -126,6 +126,84 @@ test('authorizes only the live sudo key and rejects direct or proxy paths', () =
   state.chainSudoKey = null;
 });
 
+test('extracts and authorizes emission controls through multisig sudo batchAll', () => {
+  const signer = '5GRCukV2rZmSVfJhAXoLjcrU1pMVCf2Ra1ydbiCFZdaQXDXo';
+  const otherSignatories = [
+    '5E7RCRrPVS8TckCDjr92B5ciGziwz2kfvxe4URy3L7AgirGJ',
+    '5FevFjov8435t5XC2MUSRpFYxtthE8pZy1toHpgAAia3ZphG'
+  ];
+  const sudoMultisig = '5DcSqBNqCmfdJZRGFSwwcRb2dZdJHZuKK8Tb1Gx8gbmF5E8s';
+  const controlCall = netuid => ({
+    section: 'adminUtils',
+    method: 'sudoSetSubnetEmissionEnabled',
+    args: [{ toString: () => String(netuid) }, { toString: () => 'true' }],
+    meta: {
+      args: [
+        { name: { toString: () => 'netuid' } },
+        { name: { toString: () => 'enabled' } }
+      ]
+    }
+  });
+  const batchCall = {
+    section: 'utility',
+    method: 'batchAll',
+    args: [{ toArray: () => [controlCall(89), controlCall(127)] }]
+  };
+  const sudoCall = { section: 'sudo', method: 'sudo', args: [batchCall] };
+  const extrinsic = {
+    hash: { toHex: () => '0xmultisig' },
+    signer: { toString: () => signer },
+    tip: { toString: () => '0' },
+    nonce: { toString: () => '40' },
+    method: {
+      section: 'multisig',
+      method: 'asMulti',
+      args: [
+        { toString: () => '2' },
+        { toArray: () => otherSignatories.map(address => ({ toString: () => address })) },
+        null,
+        sudoCall,
+        null
+      ]
+    }
+  };
+
+  const calls = extractSubtensorCalls(extrinsic);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(call => call.args.netuid.toString()), ['89', '127']);
+  assert.deepEqual(calls[0].wrappers, [
+    { section: 'multisig', method: 'asMulti', threshold: 2, otherSignatories },
+    { section: 'sudo', method: 'sudo' },
+    { section: 'utility', method: 'batchAll' }
+  ]);
+
+  state.chainSudoKey = sudoMultisig;
+  try {
+    assert.equal(emissionAuthorizer.isAuthorizedRootCall(calls[0]), true);
+    assert.equal(emissionAuthorizer.isAuthorizedRootCall({
+      ...calls[0],
+      wrappers: [
+        { section: 'proxy', method: 'proxy' },
+        ...calls[0].wrappers
+      ]
+    }), false);
+    assert.equal(emissionAuthorizer.isAuthorizedRootCall({
+      ...calls[0],
+      wrappers: calls[0].wrappers.map(wrapper => wrapper.section === 'multisig'
+        ? {
+            ...wrapper,
+            otherSignatories: [
+              otherSignatories[0],
+              '5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u'
+            ]
+          }
+        : wrapper)
+    }), false);
+  } finally {
+    state.chainSudoKey = null;
+  }
+});
+
 test('builds stable de-duplication keys', () => {
   const key = getCallKey({
     txHash: '0xhash',
@@ -389,9 +467,43 @@ test('routes trusted emission controls and clears state on disable events', () =
     emissionWatcher.handlePendingExtrinsic(parsed);
     assert.equal(triggers.length, 1);
     assert.equal(triggers[0].netuid, 12);
+    assert.equal(triggers[0].source, 'Mempool-Sudo');
+    assert.equal(triggers[0].callPath, 'sudo.sudo -> adminUtils.sudo_set_subnet_emission_enabled');
 
     emissionWatcher.handlePendingExtrinsic({ ...parsed, signer: '5Fake', txHash: '0xfake' });
     assert.equal(triggers.length, 1);
+
+    state.chainSudoKey = '5DcSqBNqCmfdJZRGFSwwcRb2dZdJHZuKK8Tb1Gx8gbmF5E8s';
+    emissionWatcher.handlePendingExtrinsic({
+      ...parsed,
+      signer: '5GRCukV2rZmSVfJhAXoLjcrU1pMVCf2Ra1ydbiCFZdaQXDXo',
+      txHash: '0xmultisig',
+      wrappers: [
+        {
+          section: 'multisig',
+          method: 'asMulti',
+          threshold: 2,
+          otherSignatories: [
+            '5E7RCRrPVS8TckCDjr92B5ciGziwz2kfvxe4URy3L7AgirGJ',
+            '5FevFjov8435t5XC2MUSRpFYxtthE8pZy1toHpgAAia3ZphG'
+          ]
+        },
+        { section: 'sudo', method: 'sudo' },
+        { section: 'utility', method: 'batchAll' }
+      ]
+    });
+    assert.equal(triggers.length, 2);
+    assert.equal(triggers[1].source, 'Mempool-Multisig-Sudo');
+    assert.equal(triggers[1].callPath, 'multisig.asMulti -> sudo.sudo -> utility.batchAll -> adminUtils.sudo_set_subnet_emission_enabled');
+
+    emissionWatcher.handleBlockEvent({
+      type: 'SUBNET_EMISSION_ENABLED_SET',
+      netuid: 13,
+      enabled: true
+    }, 101);
+    assert.equal(triggers.length, 3);
+    assert.equal(triggers[2].source, 'Block-Event-Fallback');
+    assert.equal(triggers[2].triggerBlock, 101);
 
     state.emissionRuns.set(12, { status: 'success' });
     emissionWatcher.handleBlockEvent({
@@ -512,6 +624,12 @@ test('routes all supported trigger calls to the correct strategy handler', async
     await router.handlePendingExtrinsic({ callName: 'set_subnet_identity' });
     await router.handlePendingExtrinsic({ callName: 'announce_coldkey_swap' });
     await router.handlePendingExtrinsic({ callName: 'sudo_set_subnet_emission_enabled' });
+    assert.deepEqual(calls, ['register', 'start', 'rename', 'swap', 'emission']);
+
+    await router.handlePendingExtrinsic({
+      callName: 'start_call',
+      wrappers: [{ section: 'multisig', method: 'asMulti' }]
+    });
     assert.deepEqual(calls, ['register', 'start', 'rename', 'swap', 'emission']);
   } finally {
     dashing.handleRegisterNetwork = originals.register;

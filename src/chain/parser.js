@@ -69,6 +69,41 @@ function extractSubtensorCalls(ext) {
       }
     }
 
+    if (section === 'multisig' && /^(asMulti|as_multi)$/i.test(method)) {
+      const argsList = (call.args && typeof call.args.toArray === 'function')
+        ? call.args.toArray()
+        : (call.args || []);
+      const thresholdRaw = call.args && call.args.threshold !== undefined
+        ? call.args.threshold
+        : argsList[0];
+      const otherSignatoriesRaw = call.args && (
+        call.args.otherSignatories !== undefined || call.args.other_signatories !== undefined
+      )
+        ? (call.args.otherSignatories || call.args.other_signatories)
+        : argsList[1];
+      let innerCall = call.args && call.args.call !== undefined ? call.args.call : argsList[3];
+
+      if (innerCall && typeof innerCall.unwrap === 'function' && innerCall.isSome === true) {
+        innerCall = innerCall.unwrap();
+      }
+
+      const threshold = thresholdRaw !== undefined && thresholdRaw !== null
+        ? Number(thresholdRaw.toString())
+        : null;
+      const otherSignatories = otherSignatoriesRaw && typeof otherSignatoriesRaw.toArray === 'function'
+        ? otherSignatoriesRaw.toArray().map(address => address.toString())
+        : Array.isArray(otherSignatoriesRaw)
+          ? otherSignatoriesRaw.map(address => address.toString())
+          : [];
+
+      if (innerCall && typeof innerCall.section === 'string' && typeof innerCall.method === 'string') {
+        return recurse(innerCall, `${currentPath}.m`, currentSigner, [
+          ...wrappers,
+          { section: 'multisig', method, threshold, otherSignatories }
+        ]);
+      }
+    }
+
     if (section === 'sudo' && /^(sudo|sudoUncheckedWeight|sudo_unchecked_weight)$/i.test(method)) {
       const argsList = call.args && typeof call.args.toArray === 'function'
         ? call.args.toArray()
