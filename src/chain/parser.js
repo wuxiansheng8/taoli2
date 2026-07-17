@@ -1,3 +1,15 @@
+function optionToString(value) {
+  if (value === null || value === undefined || value.isNone === true) {
+    return null;
+  }
+
+  const unwrapped = value.isSome === true && typeof value.unwrap === 'function'
+    ? value.unwrap()
+    : value;
+
+  return unwrapped?.toString() || null;
+}
+
 function codecToSortableBigInt(value) {
   if (value === null || value === undefined) return 0n;
 
@@ -44,29 +56,34 @@ function extractSubtensorCalls(ext) {
     }
 
     if (section === 'proxy' && /^(proxy|proxyAnnounced|proxy_announced)$/i.test(method)) {
-      const argsList = (call.args && typeof call.args.toArray === 'function') ? call.args.toArray() : (call.args || []);
-      
-      let real = null;
-      if (/^proxy$/i.test(method)) {
-        real = argsList[0];
-      } else if (/^(proxyAnnounced|proxy_announced)$/i.test(method)) {
-        real = argsList[1];
-      }
-      const realAddress = real ? real.toString() : currentSigner;
+      const argsList = call.args && typeof call.args.toArray === 'function'
+        ? call.args.toArray()
+        : (call.args || []);
+      const announced = !/^proxy$/i.test(method);
+      const delegateRaw = announced ? argsList[0] : currentSigner;
+      const realRaw = announced ? argsList[1] : argsList[0];
+      const forceTypeRaw = announced ? argsList[2] : argsList[1];
+      let innerCall = announced ? argsList[3] : argsList[2];
 
-      for (let i = 0; i < argsList.length; i++) {
-        const arg = argsList[i];
-        let unwrapped = arg;
-        if (arg && typeof arg.unwrap === 'function' && typeof arg.isSome === 'boolean' && arg.isSome) {
-          unwrapped = arg.unwrap();
-        }
-        if (unwrapped && typeof unwrapped.section === 'string' && typeof unwrapped.method === 'string') {
-          return recurse(unwrapped, `${currentPath}.p${i}`, realAddress, [
-            ...wrappers,
-            { section: 'proxy', method }
-          ]);
-        }
+      if (innerCall?.isSome === true && typeof innerCall.unwrap === 'function') {
+        innerCall = innerCall.unwrap();
       }
+
+      if (!innerCall?.section || !innerCall?.method) return [];
+
+      const real = realRaw?.toString() || null;
+      return recurse(innerCall, `${currentPath}.p`, real || currentSigner, [
+        ...wrappers,
+        {
+          section: 'proxy',
+          method,
+          announced,
+          delegate: delegateRaw?.toString() || null,
+          real,
+          forceProxyType: optionToString(forceTypeRaw),
+          call: innerCall
+        }
+      ]);
     }
 
     if (section === 'multisig' && /^(asMulti|as_multi)$/i.test(method)) {

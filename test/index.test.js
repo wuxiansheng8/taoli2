@@ -15,6 +15,7 @@ const frontrun = require('../src/strategies/frontrun');
 const emissionAuthorizer = require('../src/strategies/emissionAuthorizer');
 const emissionWatcher = require('../src/strategies/emissionWatcher');
 const emissionFrontrun = require('../src/strategies/emissionFrontrun');
+const proxyValidator = require('../src/chain/proxyValidator');
 const runtime = require('../src/runtime');
 const bot = require('../bot');
 
@@ -72,6 +73,82 @@ test('propagates real signer through proxy and proxy_announced calls', () => {
 
   assert.equal(proxy[0].signer, '5RealSenderAddress');
   assert.equal(announced[0].signer, '5AnnouncedRealAddress');
+  assert.deepEqual(
+    {
+      announced: proxy[0].wrappers[0].announced,
+      delegate: proxy[0].wrappers[0].delegate,
+      real: proxy[0].wrappers[0].real,
+      forceProxyType: proxy[0].wrappers[0].forceProxyType
+    },
+    {
+      announced: false,
+      delegate: '5ProxySignerAddress',
+      real: '5RealSenderAddress',
+      forceProxyType: null
+    }
+  );
+  assert.equal(announced[0].wrappers[0].announced, true);
+  assert.equal(announced[0].wrappers[0].delegate, '5DelegateAddress');
+});
+
+test('validates proxy definitions against the runtime filter', async () => {
+  const originals = {
+    definitions: subtensorClient.queryProxyDefinitions,
+    announcements: subtensorClient.queryProxyAnnouncements,
+    filters: subtensorClient.callProxyFilters
+  };
+  const call = {
+    section: 'subtensorModule',
+    method: 'startCall',
+    callIndex: Uint8Array.from([7, 92]),
+    toU8a: () => Uint8Array.from([7, 92, 12])
+  };
+  const definition = {
+    delegate: { toString: () => '5Delegate' },
+    proxyType: { index: 16, toString: () => 'SubnetLeaseBeneficiary' },
+    delay: { toString: () => '0' }
+  };
+
+  try {
+    subtensorClient.queryProxyDefinitions = async () => [[definition], 0];
+    subtensorClient.queryProxyAnnouncements = async () => [[], 0];
+    subtensorClient.callProxyFilters = async () => [{
+      filterMode: {
+        isAllowAll: false,
+        isAllow: true,
+        asAllow: [{
+          palletIndex: { toString: () => '7' },
+          callIndex: { toString: () => '92' },
+          constraint: { isSome: false }
+        }]
+      }
+    }];
+
+    const parsed = {
+      wrappers: [{
+        section: 'proxy',
+        method: 'proxy',
+        announced: false,
+        delegate: '5Delegate',
+        real: '5Real',
+        forceProxyType: null,
+        call
+      }]
+    };
+
+    assert.equal((await proxyValidator.validateProxyWrappers(parsed)).allowed, true);
+
+    subtensorClient.callProxyFilters = async () => [{
+      filterMode: { isAllowAll: false, isAllow: true, asAllow: [] }
+    }];
+    const rejected = await proxyValidator.validateProxyWrappers(parsed);
+    assert.equal(rejected.allowed, false);
+    assert.match(rejected.reason, /不允许执行/);
+  } finally {
+    subtensorClient.queryProxyDefinitions = originals.definitions;
+    subtensorClient.queryProxyAnnouncements = originals.announcements;
+    subtensorClient.callProxyFilters = originals.filters;
+  }
 });
 
 test('extracts emission controls only through supported sudo wrappers', () => {
@@ -637,6 +714,40 @@ test('routes all supported trigger calls to the correct strategy handler', async
     frontrun.handleRename = originals.rename;
     frontrun.handleColdkeySwap = originals.swap;
     emissionWatcher.handlePendingExtrinsic = originals.emission;
+  }
+});
+
+test('routes only proxy calls accepted by the proxy validator', async () => {
+  const originalStart = dashing.handleStartCall;
+  const originalValidate = proxyValidator.validateProxyWrappers;
+  let starts = 0;
+
+  try {
+    dashing.handleStartCall = async () => { starts++; };
+    proxyValidator.validateProxyWrappers = async () => ({
+      allowed: true,
+      proxyType: 'SubnetLeaseBeneficiary',
+      announced: false
+    });
+
+    const parsed = {
+      section: 'subtensorModule',
+      callName: 'start_call',
+      wrappers: [{ section: 'proxy' }]
+    };
+
+    await router.handlePendingExtrinsic(parsed);
+    assert.equal(starts, 1);
+
+    proxyValidator.validateProxyWrappers = async () => ({
+      allowed: false,
+      reason: 'not allowed'
+    });
+    await router.handlePendingExtrinsic(parsed);
+    assert.equal(starts, 1);
+  } finally {
+    dashing.handleStartCall = originalStart;
+    proxyValidator.validateProxyWrappers = originalValidate;
   }
 });
 

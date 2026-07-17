@@ -350,6 +350,28 @@ async function subscribeSudoKey(callback) {
   return state.api.query.sudo.key(callback);
 }
 
+async function queryProxyDefinitions(real) {
+  if (!state.api?.query?.proxy?.proxies) {
+    throw new Error('Runtime does not expose proxy.proxies');
+  }
+  return state.api.query.proxy.proxies(real);
+}
+
+async function queryProxyAnnouncements(delegate) {
+  if (!state.api?.query?.proxy?.announcements) {
+    throw new Error('Runtime does not expose proxy.announcements');
+  }
+  return state.api.query.proxy.announcements(delegate);
+}
+
+async function callProxyFilters(proxyTypeIndexes) {
+  const runtimeApi = state.api?.call?.proxyFilterRuntimeApi;
+  if (typeof runtimeApi?.getProxyFilters !== 'function') {
+    throw new Error('Runtime does not expose ProxyFilterRuntimeApi');
+  }
+  return runtimeApi.getProxyFilters(proxyTypeIndexes);
+}
+
 async function callSubnetInfoGetSubnetToPrune() {
   if (!state.api) return null;
   try {
@@ -513,6 +535,9 @@ module.exports = {
   querySubnetEmissionEnabledMulti,
   hasSudoKeyStorage,
   subscribeSudoKey,
+  queryProxyDefinitions,
+  queryProxyAnnouncements,
+  callProxyFilters,
   callSubnetInfoGetSubnetToPrune,
   rpcSubnetInfoGetSubnetToPrune,
   queryRawSubnetToPrune,
