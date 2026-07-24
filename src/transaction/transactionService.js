@@ -232,7 +232,14 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
       }
       const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${broadcastAt - meta.detectedAt}ms` : '';
       if (!meta || !meta.isPrivate) {
-        log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并广播 ${callDetails} | Nonce: ${reservedNonce} | 签名耗时: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms | 广播前准备: ${broadcastAt - signedAt}ms${latencyStr}`, broadcastAt);
+        log(
+          'INFO',
+          `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并广播 ${callDetails} | ` +
+            `Nonce: ${reservedNonce} | 哈希: ${tx.hash.toHex()} | ` +
+            `签名耗时: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms | ` +
+            `广播前准备: ${broadcastAt - signedAt}ms${latencyStr}`,
+          broadcastAt
+        );
       }
     } catch (err) {
       walletService.refreshNonceForwardOnly(address);

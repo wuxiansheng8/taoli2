@@ -8,6 +8,9 @@ const router = require('../strategies/router');
 const subtensorClient = require('../chain/subtensorClient');
 const privateWallet = require('../privateWallet');
 const emissionWatcher = require('../strategies/emissionWatcher');
+const emissionFrontrun = require('../strategies/emissionFrontrun');
+
+const EVENT_QUERY_RETRY_DELAY_MS = 200;
 
 class BlockScanner {
   constructor() {
@@ -69,6 +72,21 @@ class BlockScanner {
     }
   }
 
+  async getBlockEvents(blockHash, blockNumber) {
+    try {
+      return await subtensorClient.querySystemEventsAt(blockHash);
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, EVENT_QUERY_RETRY_DELAY_MS));
+
+      try {
+        return await subtensorClient.querySystemEventsAt(blockHash);
+      } catch (error) {
+        log('WARN', `[区块事件] 读取区块 #${blockNumber} 事件失败，重试后仍未成功: ${error.message}`);
+        return [];
+      }
+    }
+  }
+
   async detectEventsInBlock(blockHash, blockNumber) {
     const settings = config.getSettings();
     const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
@@ -90,12 +108,7 @@ class BlockScanner {
       }
     };
 
-    let allRecords = [];
-    try {
-      allRecords = await subtensorClient.querySystemEventsAt(blockHash);
-    } catch (err) {
-      // Ignore event fetching error
-    }
+    const allRecords = await this.getBlockEvents(blockHash, blockNumber);
 
     if (allRecords && allRecords.length > 0) {
       for (const record of allRecords) {
@@ -225,6 +238,15 @@ class BlockScanner {
           const hotkey = decoded.hotkey;
           const amountTao = decoded.amountTao.toFixed(2);
           const netuid = decoded.netuid;
+
+          const confirmedByEmissionStrategy = emissionFrontrun.confirmStakeAdded({
+            netuid,
+            coldkey,
+            hotkey,
+            blockNumber,
+            txIndex: extrinsicIndex
+          });
+          if (confirmedByEmissionStrategy) continue;
 
           const w = state.wallets.find(x => x.pair && x.pair.address === coldkey);
           if (w) {

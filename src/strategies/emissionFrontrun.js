@@ -5,6 +5,8 @@ const subnetCache = require('../chain/subnetCache');
 const transactionService = require('../transaction/transactionService');
 const { sendTelegramAlert, sendFlashDutyAlert, escapeHtml } = require('../notifier');
 
+const CONFIRMATION_WINDOW_MS = 2 * 60 * 1000;
+
 function notifySuccessOnce(run, walletName, txResult, settings) {
   if (run.alerted) return;
   run.alerted = true;
@@ -15,6 +17,9 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
   const indexLine = txResult.txIndex !== null && txResult.txIndex !== undefined
     ? `• <b>排队位置</b>: <code>第 ${txResult.txIndex} 笔交易</code>\n`
     : '';
+  const hashLine = txResult.hash
+    ? `• <b>交易哈希</b>: <code>${txResult.hash}</code>\n`
+    : '';
   const message =
     `✅ <b>[策略4 TAO侧排放抢跑成功]</b>\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
@@ -23,16 +28,50 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
     `• <b>触发来源</b>: <code>${run.source}</code>\n` +
     blockLine +
     indexLine +
-    `• <b>交易哈希</b>: <code>${txResult.hash}</code>\n` +
+    hashLine +
     `━━━━━━━━━━━━━━━━━━`;
 
   sendTelegramAlert(message).catch(() => {});
   sendFlashDutyAlert(
     `TAOLI 策略4抢跑成功 - 子网 #${run.netuid}`,
-    `钱包 ${walletName} 已在子网 #${run.netuid} 成功提交 TAO 质押。交易哈希: ${txResult.hash}`,
+    `钱包 ${walletName} 已在子网 #${run.netuid} 成功提交 TAO 质押。` +
+      (txResult.hash ? `交易哈希: ${txResult.hash}` : `确认区块: #${txResult.blockNumber}`),
     settings
   ).catch(() => {});
-  log('SUCCESS', `[策略4/成功] 来源: ${run.source} | 子网: #${run.netuid} | 钱包【${walletName}】| 成交区块: #${txResult.blockNumber || '未知'} | 位置: ${txResult.txIndex ?? '未知'} | 总耗时: ${Date.now() - run.detectedAt}ms | 哈希: ${txResult.hash}`);
+  log(
+    'SUCCESS',
+    `[策略4/成功] 来源: ${run.source} | 子网: #${run.netuid} | ` +
+      `钱包【${walletName}】| 成交区块: #${txResult.blockNumber || '未知'} | ` +
+      `位置: ${txResult.txIndex ?? '未知'} | 总耗时: ${Date.now() - run.detectedAt}ms | ` +
+      `哈希: ${txResult.hash || '由区块事件确认'}`
+  );
+}
+
+function confirmStakeAdded({ netuid, coldkey, hotkey, blockNumber, txIndex }) {
+  const run = state.emissionRuns.get(netuid);
+  if (
+    !run ||
+    run.hotkey !== hotkey ||
+    Date.now() - run.detectedAt > CONFIRMATION_WINDOW_MS
+  ) {
+    return false;
+  }
+
+  const wallet = state.wallets.find(item =>
+    item.enabled !== false &&
+    item.isPrivate !== true &&
+    item.pair?.address === coldkey
+  );
+  if (!wallet) return false;
+
+  run.status = 'success';
+  notifySuccessOnce(run, wallet.name, {
+    hash: null,
+    blockNumber,
+    txIndex
+  }, config.getSettings());
+
+  return true;
 }
 
 async function executeRun(run, wallets, hotkey, settings) {
@@ -156,6 +195,7 @@ function trigger({ netuid, source, triggerId, triggerBlock = null, callPath = nu
 
   const run = {
     netuid,
+    hotkey,
     source,
     triggerId,
     triggerBlock,
@@ -179,5 +219,6 @@ function trigger({ netuid, source, triggerId, triggerBlock = null, callPath = nu
 }
 
 module.exports = {
-  trigger
+  trigger,
+  confirmStakeAdded
 };
