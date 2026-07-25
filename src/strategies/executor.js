@@ -6,6 +6,12 @@ const { sendTelegramAlert, sendFlashDutyAlert, escapeHtml } = require('../notifi
 const { buildFixedLimitStakeTx, buildStakeTx, sendStrategicTx } = require('../transaction/transactionService');
 const privateWallet = require('../privateWallet');
 
+const FLASH_DUTY_STRATEGY_TITLES = {
+  'new-subnet-primary': 'TAOLI 策略1 | 新子网打新',
+  rename: 'TAOLI 策略2 | 改名抢跑',
+  'coldkey-swap': 'TAOLI 策略3 | 冷键交换'
+};
+
 function getStrategyKeys(strategyId, netuid, hotkey) {
   return {
     lockKey: `${strategyId}:${netuid}`,
@@ -262,7 +268,7 @@ async function executeStrategy(plan) {
       if (strategyId === 'new-subnet-primary') {
         afterBroadcast.push(() => {
           sendFlashDutyAlert(
-            `TAOLI 启动极速打新抢购机制`,
+            `${FLASH_DUTY_STRATEGY_TITLES[strategyId]} | SN${netuid}`,
             `触发源: ${extraParams?.triggerSource || 'startCall'}\n目标子网: SN#${netuid}\n目标 Hotkey: ${hotkey}\n策略通道: 主线打新\n打新金额: ${amountTao} TAO`,
             settings
           ).catch(() => {});
@@ -274,7 +280,7 @@ async function executeStrategy(plan) {
     } else {
       afterBroadcast.push(() => {
         sendFlashDutyAlert(
-          `TAOLI 启动抢跑机制 - ${label}`,
+          `${FLASH_DUTY_STRATEGY_TITLES[strategyId]} | SN${netuid}`,
           `目标子网: SN#${netuid}\n目标 Hotkey: ${hotkey}\n策略: ${label}\n抢跑金额: ${amountTao} TAO`,
           settings
         ).catch(() => {});

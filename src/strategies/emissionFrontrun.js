@@ -33,7 +33,7 @@ function notifySuccessOnce(run, walletName, txResult, settings) {
 
   sendTelegramAlert(message).catch(() => {});
   sendFlashDutyAlert(
-    `TAOLI 策略4抢跑成功 - 子网 #${run.netuid}`,
+    `TAOLI 策略4 | 开启排放 | SN${run.netuid}`,
     `钱包 ${walletName} 已在子网 #${run.netuid} 成功提交 TAO 质押。` +
       (txResult.hash ? `交易哈希: ${txResult.hash}` : `确认区块: #${txResult.blockNumber}`),
     settings
